@@ -2,28 +2,20 @@
 
 Dashboard tidak resmi untuk melihat profil pemain, skill, dan perusahaan (company) di game [WarEra](https://app.warera.io), dengan data langsung dari WarEra API.
 
-> ⚠️ **Proyek pihak ketiga, tidak berafiliasi dengan WarEra.** Dibuat untuk kebutuhan komunitas eco-player.
+>  **Proyek pihak ketiga, tidak berafiliasi dengan WarEra.** Dibuat untuk kebutuhan komunitas eco-player.
 
 ## Fitur
 
-### Sudah Berjalan
-- 🔍 Cari pemain berdasarkan username atau User ID
-- 👤 Lihat profil pemain (level, wealth, skill)
-- 🏢 Lihat daftar company milik pemain, lengkap dengan:
+- Cari pemain berdasarkan username atau User ID
+- Lihat profil pemain (level, wealth, skill)
+- Lihat daftar company milik pemain, lengkap dengan:
   - Item yang diproduksi (icon + jumlah/hari)
   - Level Automated Engine (AE) dan estimasi PP/day
   - Status storage (penuh/tidak)
-- 🔑 Dukungan API Token untuk mengakses data company (disimpan lokal di browser)
-- 📈 Endpoint harga market (`itemTrading.getPrices`) sudah tersedia di backend
+- Dukungan API Token untuk mengakses data company (disimpan lokal di browser)
+- Endpoint harga market (`itemTrading.getPrices`) tersedia di backend
 
-### Dalam Pengembangan / Belum Terhubung ke UI
-- 🛡️ **Mode Safe Play (Anti-Stunting Wealth)** — Job Market Radar untuk merekomendasikan lowongan kerja dengan gaji bersih terbaik
-- ⚠️ **Mode High Risk (Trading & Geopolitik)**:
-  - Transaction & Flipping Ledger — kalkulator pencatat trading market dengan perhitungan cuan bersih
-  - Geopolitical & Tax Radar — pemantauan Bonus Produksi vs Pajak Kerja antar negara, termasuk deteksi negara "jebakan bandar" (bonus produksi tinggi tapi militer lemah, rawan bombardir)
-- 🎒 Inventory Panel — menampilkan equipment yang dipakai pemain
-
-> Beberapa komponen di atas (`InventoryPanel.jsx`, `TransactionHistory.jsx`) sudah ada filenya di `src/components/`, tapi **belum di-import ke `App.jsx`**, jadi belum tampil di UI. Lihat bagian [TODO](#yang-masih-kurang--todo).
+> Lihat [ROADMAP.md](./ROADMAP.md) untuk daftar fitur yang sedang direncanakan/dikembangkan.
 
 ## Screenshot
 
@@ -43,9 +35,7 @@ war-era-test/
 │   │   │   ├── playerCard.jsx
 │   │   │   ├── StatsCard.jsx
 │   │   │   ├── SimulatorPanel.jsx
-│   │   │   ├── CompanyList.jsx
-│   │   │   ├── InventoryPanel.jsx       # belum terhubung ke App.jsx
-│   │   │   └── TransactionHistory.jsx   # belum terhubung ke App.jsx
+│   │   │   └── CompanyList.jsx
 │   │   ├── App.jsx
 │   │   └── main.jsx
 │   └── package.json
@@ -125,25 +115,9 @@ Beberapa hal yang ditemukan selama pengembangan, mungkin berguna untuk kontribut
   | 6        | 144    |
   | 7        | 186    |
 
-- **Pajak market vs kerja** (belum diverifikasi langsung dari API, perlu konfirmasi lebih lanjut): transaksi jual-beli di market diduga bebas pajak, sementara potongan pajak hanya berlaku pada sistem penggajian dan dialirkan ke negara tempat company berdiri.
-- **Geopolitik**: negara dengan Bonus Produksi tinggi namun kekuatan militer lemah berpotensi jadi target bombardir — analisis otomatis untuk ini belum diimplementasikan (lihat TODO).
+## Roadmap
 
-## Yang Masih Kurang / TODO
-
-Bantuan komunitas sangat diterima untuk:
-
-- [ ] Validasi ulang tabel PP/day di atas — apakah konsisten untuk semua jenis item, atau ada variasi?
-- [ ] Hubungkan `InventoryPanel.jsx` ke `App.jsx` (file sudah ada, baru berupa draft fungsi tanpa komponen lengkap)
-- [ ] Hubungkan `TransactionHistory.jsx` ke `App.jsx` dan sambungkan ke data transaksi asli dari API
-- [ ] Bangun kalkulator **Transaction & Flipping Ledger** (cuan bersih trading) — belum ada filenya
-- [ ] Bangun **Geopolitical & Tax Radar** (analisis Bonus Produksi vs Defense per negara) — belum ada filenya
-- [ ] Bangun **Job Market Radar** (rekomendasi kerja berdasarkan energi & gaji bersih) — belum ada filenya
-- [ ] Indikator overpriced/underpriced di data market (`itemTrading.getPrices` baru menampilkan harga mentah)
-- [ ] Penanganan rate limit WarEra API (saat ini belum ada retry/backoff)
-- [ ] Dukungan multi-halaman untuk pemain dengan company > 10 (saat ini `perPage` di-hardcode)
-- [ ] Loading state per-company saat fetch detail (saat ini loading global)
-- [ ] Unit test untuk komponen dan controller
-- [ ] Error handling untuk username/ID yang tidak ditemukan masih sederhana
+Daftar fitur yang direncanakan dan progres pengembangan ada di [ROADMAP.md](./ROADMAP.md).
 
 ## Kontribusi
 
