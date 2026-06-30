@@ -1,44 +1,88 @@
 import React, { useState, useEffect } from 'react';
-import { getCompaniesByUserId } from '../api/apiClient';
+import { getCompaniesByUserId, fetchWarera } from '../api/apiClient';
 
 // Tabel konversi Level Automated Engine (AE) -> PP/day.
-// Dikonfirmasi langsung dari in-game.
 const AE_PP_PER_DAY = {
-  1: 24,
-  2: 48,
-  3: 72,
-  4: 96,
-  5: 120,
-  6: 144,
-  7: 186,
+  1: 24, 2: 48, 3: 72, 4: 96, 5: 120, 6: 144, 7: 186,
 };
 
-export default function CompanyAnalysis({ userId, token,}) {
+export default function CompanyAnalysis({ userId, token }) {
   const [isLoading, setIsLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
   const [data, setData] = useState(null);
+
+  // STATE UNTUK KAMUS
   const [regionsDict, setRegionsDict] = useState({});
+  const [countriesDict, setCountriesDict] = useState({});
+  const [partiesDict, setPartiesDict] = useState({}); 
   const [expandedId, setExpandedId] = useState(null);
 
-  useEffect(() => {
-    const fetchRegionsDictionary = async () => {
-      try {
-        const res = await fetch("https://api2.warera.io/trpc/region.getRegionsObject", {
-          method: "GET",
-          headers: { "accept": "application/json" }
-        });
-        const json = await res.json();
+  // FETCH KAMUS REGION & NEGARA SECARA BERSAMAAN
+ useEffect(() => {
+    const initData = async () => {
+      // 1. Ambil data negara menggunakan fetchWarera (karena getAllCountries bisa mentolerir cara lama Anda)
+      const countriesRes = await fetchWarera('country.getAllCountries', {}, token);
+      
+      if (countriesRes.success) {
+        const countries = countriesRes.data;
+        setCountriesDict(countries.reduce((acc, c) => ({ ...acc, [c._id]: c }), {}));
 
-        if (json?.result?.data) {
-          setRegionsDict(json.result.data); // Data kamus berhasil disimpan!
+        // 2. Kumpulkan ID Partai Unik
+        const partyIds = [...new Set(countries.map(c => c.rulingParty).filter(Boolean))];
+
+        // 3. FUNGSI CHUNKING: Pecah array menjadi potongan kecil (maks 25 ID per request)
+        const chunkSize = 25; 
+        const pDict = {};
+
+        // Loop untuk mengirim request GET per kelompok
+        for (let i = 0; i < partyIds.length; i += chunkSize) {
+          const chunk = partyIds.slice(i, i + chunkSize);
+          
+          // Susun input tRPC untuk potongan ini
+          const batchInput = {};
+          chunk.forEach((id, idx) => { batchInput[idx] = { partyId: id }; });
+          
+          // Susun URL dengan GET yang di-encode
+          const encodedInput = encodeURIComponent(JSON.stringify(batchInput));
+          // Buat string party.getById diulang sesuai jumlah chunk
+          const methodString = Array(chunk.length).fill('party.getById').join(',');
+          
+          const url = `https://api2.warera.io/trpc/${methodString}?batch=1&input=${encodedInput}`;
+
+          try {
+            // Lakukan FETCH GET EKSPLISIT melewati proxy/post bawaan apiClient
+            const res = await fetch(url, {
+              method: 'GET',
+              headers: {
+                'accept': 'application/json',
+                'x-api-key': token // Pastikan token valid
+              }
+            });
+
+            if (res.ok) {
+              const data = await res.json();
+              // Gabungkan hasil ke dictionary utama
+              data.forEach((p, idx) => {
+                if (p?.result?.data) {
+                  pDict[chunk[idx]] = p.result.data;
+                }
+              });
+            }
+          } catch (err) {
+            console.error(`Gagal memuat batch partai dari index ${i}:`, err);
+          }
         }
-      } catch (err) {
-        console.error("Gagal mengambil kamus region:", err);
+
+        // Simpan semua partai yang berhasil ditarik ke state
+        setPartiesDict(pDict);
+        console.log("Kamus Partai Berhasil Dimuat (Chunked):", pDict);
       }
     };
 
-    fetchRegionsDictionary();
-  }, []);
+    if (token) {
+      initData();
+    }
+  }, [token]);
 
   useEffect(() => {
     if (!userId) {
@@ -51,7 +95,8 @@ export default function CompanyAnalysis({ userId, token,}) {
   const handleAnalyse = async () => {
     setIsLoading(true);
     setErrorMsg('');
-    const result = await getCompaniesByUserId(userId, token, regionsDict,);
+    // Pastikan parameter di API client sesuai dengan yang Anda butuhkan
+    const result = await getCompaniesByUserId(userId, token);
     if (result.success) {
       setData(result);
     } else {
@@ -63,6 +108,7 @@ export default function CompanyAnalysis({ userId, token,}) {
   const companies = data?.companies || [];
   const totalProduction = companies.reduce((sum, c) => {
     const val = typeof c?.production === 'number' ? c.production : 0;
+
     return sum + val;
   }, 0);
 
@@ -142,6 +188,8 @@ export default function CompanyAnalysis({ userId, token,}) {
                 key={comp?._id || index}
                 comp={comp}
                 regionsDict={regionsDict}
+                countriesDict={countriesDict}
+                partiesDict={partiesDict}
                 isExpanded={expandedId === (comp?._id || index)}
                 onToggle={() => setExpandedId(prev => prev === (comp?._id || index) ? null : (comp?._id || index))}
               />
@@ -169,16 +217,34 @@ function SummaryStat({ label, value, color = '#fff' }) {
   );
 }
 
-function CompanyListItem({ comp, regionsDict, isExpanded, onToggle }) {
+function CompanyListItem({ comp, regionsDict, countriesDict, partiesDict, isExpanded, onToggle }) {
   const aeLevel = comp?.activeUpgradeLevels?.automatedEngine ?? 0;
   const ppPerDay = AE_PP_PER_DAY[aeLevel];
 
+  // 1. Definisikan regionData TERLEBIH DAHULU
+  const regionData = regionsDict[comp?.region];
+  const regionName = regionData?.name || comp?.location || null;
+
+  // 2. Baru ambil countryData & partyData
+  const countryData = countriesDict[regionData?.country];
+  const partyData = partiesDict ? partiesDict[countryData?.rulingParty] : null;
+
+  // 3. Kalkulasi rincian
+  const nationBonus = countryData?.strategicResources?.bonuses?.productionPercent || 0;
+  const ethnicBonus = partyData?.ethnicBonusPercent || 0;
+  const depositBonus = 30;
+
+  const totalBonus = nationBonus + ethnicBonus + depositBonus;
+  // Gunakan 'totalBonus' sebagai 'prodBonus' agar selaras dengan UI Anda
+  const prodBonus = totalBonus;
+
   return (
+    // ... sisa kode Anda tetap sama ...
     <div style={{
       background: 'rgba(20, 20, 25, 0.5)', border: '1px solid #333',
       borderRadius: '10px', overflow: 'hidden',
     }}>
-      {/* HEADER (selalu terlihat, klik untuk expand) */}
+      {/* HEADER */}
       <div
         onClick={onToggle}
         style={{
@@ -219,36 +285,36 @@ function CompanyListItem({ comp, regionsDict, isExpanded, onToggle }) {
         </span>
       </div>
 
-      {/* DETAIL (expand) */}
+      {/* DETAIL */}
       {isExpanded && (
         <div style={{ padding: '0 16px 16px', borderTop: '1px solid #2a2a2a' }}>
           <div style={{ fontSize: '12px', color: '#aaa', marginTop: '12px', lineHeight: '1.6' }}>
 
-            {/* LOKASI & BONUS LANDLORD */}
             <DetailRow
               label="Lokasi (Region)"
-              value={
-                regionsDict[comp?.region]
-                  ? regionsDict[comp?.region].name
-                  : 'Mencari data... (ID: ' + (comp?.region?.slice(-5) || '—') + ')'
-              }
-            />
-            {/* 2. BONUS PRODUKSI (Menggunakan Kamus & Path JSON Baru) */}
-            <DetailRow 
-              label="Bonus Produksi" 
-              value={
-                regionsDict && regionsDict[comp?.region]?.bonuses?.productionPercent
-                  ? <span style={{ color: '#4caf50', fontWeight: 'bold' }}>
-                      +{regionsDict[comp?.region].bonuses.productionPercent}%
-                    </span> 
-                  : <span style={{ color: '#888' }}>0%</span>
-              } 
+              value={regionData ? regionName : 'Mencari data...'}
             />
 
-            {/* PEKERJA AKTIF */}
-            <DetailRow 
-              label="Pekerja Aktif" 
-              value={comp?.workerCount !== undefined ? `${comp.workerCount} Orang` : '—'} 
+            <DetailRow
+              label="Bonus Produksi"
+              value={
+                prodBonus > 0
+                  ? <span style={{ color: '#4caf50', fontWeight: 'bold' }}>+{prodBonus}%</span>
+                  : <span style={{ color: '#888' }}>0%</span>
+              }
+            />
+            <DetailRow
+              label="Bonus Etnis"
+              value={
+                <span style={{ color: '#ff9800', fontWeight: 'bold' }}>
+                  +{ethnicBonus}%
+                </span>
+              }
+            />
+
+            <DetailRow
+              label="Pekerja Aktif"
+              value={comp?.workerCount !== undefined ? `${comp.workerCount} Orang` : '—'}
             />
 
             <DetailRow
@@ -261,21 +327,21 @@ function CompanyListItem({ comp, regionsDict, isExpanded, onToggle }) {
               value={typeof comp?.production === 'number' ? `${comp.production.toFixed(2)} ${comp?.itemCode || ''}/hari` : '—'}
             />
 
-            {/* STORAGE PROGRESS BAR (Menggantikan teks "Tersedia") */}
+            {/* STORAGE PROGRESS BAR */}
             <div style={{ marginTop: '12px', padding: '10px', background: 'rgba(0,0,0,0.3)', borderRadius: '6px', border: '1px solid #333' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11px', color: '#aaa', marginBottom: '6px' }}>
-                 <span>Kapasitas Storage</span>
-                 <span style={{ color: comp?.storageUsed >= (comp?.storageMax || 800) ? '#e74c3c' : '#4caf50', fontWeight: 'bold' }}>
-                   {comp?.storageUsed || 0} / {comp?.storageMax || 800}
-                 </span>
+                <span>Kapasitas Storage</span>
+                <span style={{ color: comp?.storageUsed >= (comp?.storageMax || 800) ? '#e74c3c' : '#4caf50', fontWeight: 'bold' }}>
+                  {comp?.storageUsed || 0} / {comp?.storageMax || 800}
+                </span>
               </div>
               <div style={{ width: '100%', height: '8px', background: '#222', borderRadius: '4px', overflow: 'hidden' }}>
-                 <div style={{ 
-                   width: `${Math.min(((comp?.storageUsed || 0) / (comp?.storageMax || 800)) * 100, 100)}%`, 
-                   height: '100%', 
-                   background: comp?.storageUsed >= (comp?.storageMax || 800) ? '#e74c3c' : '#4caf50',
-                   transition: 'width 0.4s ease'
-                 }} />
+                <div style={{
+                  width: `${Math.min(((comp?.storageUsed || 0) / (comp?.storageMax || 800)) * 100, 100)}%`,
+                  height: '100%',
+                  background: comp?.storageUsed >= (comp?.storageMax || 800) ? '#e74c3c' : '#4caf50',
+                  transition: 'width 0.4s ease'
+                }} />
               </div>
             </div>
 
