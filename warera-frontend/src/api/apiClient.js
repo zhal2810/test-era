@@ -7,9 +7,12 @@ const api = axios.create({
 export const fetchWarera = async (procedure, input, explicitToken = null) => {
   const token = explicitToken ?? localStorage.getItem('warera_api_token');
   try {
-    const response = await api.post(`/${procedure}`, { input }, {
-      headers: { 'Content-Type': 'application/json', 'X-API-Key': token || '' },
-    });
+    const headers = { 'Content-Type': 'application/json' };
+    if (token) {
+      headers['X-API-Key'] = token;
+    }
+
+    const response = await api.post(`/${procedure}`, { input }, { headers });
     return { success: true, data: response.data?.result?.data };
   } catch (error) {
     return { success: false, error: error.message, data: null };
@@ -63,5 +66,15 @@ export const getCompaniesByUserId = async (userId, token = null) => {
     return { success: true, playerData: profileRes.data, companies: detailedCompanies };
   } catch (err) {
     return { success: false, error: err.message };
+  }
+};
+
+export const getItemOfferById = async (itemOfferId, token = null) => {
+  try {
+    const result = await fetchWarera('itemOffer.getById', { itemOfferId }, token);
+    if (!result.success) throw new Error(result.error);
+    return { success: true, data: result.data };
+  } catch (err) {
+    return { success: false, error: err.message, data: null };
   }
 };
