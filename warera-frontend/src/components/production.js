@@ -21,9 +21,20 @@ export const MAX_AE_LEVEL = 7;
 export function calculateCompanyProduction(comp, regionData, countryData, partyData) {
   // Fallback: kalau countryData tidak diberikan langsung, coba ambil dari regionData.countryData
   const resolvedCountryData = countryData || regionData?.countryData;
+  const hasContext = Boolean(resolvedCountryData || regionData?.deposit || partyData);
 
-  let totalEfficiency = 100;
+  let totalEfficiency = null;
   const notes = [];
+
+  if (!hasContext) {
+    notes.push('Data geografis belum cukup untuk menghitung efisiensi produksi.');
+    return {
+      totalEfficiency: null,
+      breakdownNotes: notes,
+    };
+  }
+
+  totalEfficiency = 100;
 
   // 1. Pajak Produksi (Beban Ekonomi Politik)
   const taxRate = resolvedCountryData?.taxes?.market || 0;

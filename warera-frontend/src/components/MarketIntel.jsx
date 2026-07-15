@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
-import { fetchWarera } from '../api/apiClient';
+import { fetchWarera, getItemOfferById } from '../api/apiClient';
 
 function formatItemName(key) {
   return key
@@ -92,6 +92,25 @@ function extractTopOrder(payload, kind) {
   const priceText = first.price === null ? '—' : first.price.toFixed(2);
   const qtyText = first.quantity === null ? '—' : formatVolume(first.quantity);
   return `${priceText} × ${qtyText}`;
+}
+
+function summarizeOfferDetail(payload) {
+  if (!payload || typeof payload !== 'object') return null;
+
+  const source = payload?.data ?? payload?.result ?? payload;
+  if (!source || typeof source !== 'object') return null;
+
+  const price = getNumericValue(source.price ?? source.unitPrice ?? source.avg ?? source.value ?? source.buyPrice ?? source.sellPrice ?? source.cost);
+  const quantity = getNumericValue(source.quantity ?? source.amount ?? source.qty ?? source.units ?? source.volume ?? source.count ?? source.size);
+  const side = source.side ?? source.type ?? source.kind ?? source.orderType;
+
+  if (price === null && quantity === null && !side) return null;
+
+  return {
+    price,
+    quantity,
+    side: side ? String(side) : null,
+  };
 }
 
 function resolveChangeValue(statsEntry, candidates, fallback = null, range = 'all') {
@@ -293,12 +312,22 @@ export default function MarketIntel({ token }) {
 
                     const enriched = await Promise.all(normalized.map(async (entry) => {
                         try {
-                            const orderRes = await fetchWarera('tradingOrder.getTopOrders', { itemCode: entry.item, limit: 3 }, token);
+                            const [orderRes, offerRes] = await Promise.all([
+                                fetchWarera('tradingOrder.getTopOrders', { itemCode: entry.item, limit: 3 }, token),
+                                getItemOfferById(entry.item, token),
+                            ]);
+
                             const payload = orderRes.success ? orderRes.data : null;
+                            const offerSummary = summarizeOfferDetail(offerRes?.data ?? null);
+                            const offerText = offerSummary
+                                ? `${offerSummary.side ? `${offerSummary.side} ` : ''}${offerSummary.price !== null ? `@ ${offerSummary.price.toFixed(2)}` : ''}${offerSummary.quantity !== null ? ` • ${formatVolume(offerSummary.quantity)}` : ''}`.trim()
+                                : null;
+
                             return {
                                 ...entry,
                                 topBuy: extractTopOrder(payload, 'buy'),
                                 topSell: extractTopOrder(payload, 'sell'),
+                                offerText,
                             };
                         } catch {
                             return entry;
@@ -309,7 +338,7 @@ export default function MarketIntel({ token }) {
 
                     try {
                         const nextSnapshot = Object.fromEntries(
-                            merged.map((entry) => [entry.item, Number(entry.price)])
+                            enriched.map((entry) => [entry.item, Number(entry.price)])
                         );
                         localStorage.setItem('warera_market_previous', JSON.stringify(nextSnapshot));
                     } catch {
@@ -373,10 +402,10 @@ export default function MarketIntel({ token }) {
             boxShadow: '0 0 20px rgba(52, 152, 219, 0.2)'
         }}>
             <h3 style={{ color: '#3498db', marginBottom: '12px', display: 'flex', alignItems: 'center', gap: '10px' }}>
-                📈 Market Intel
+                Market 
             </h3>
             <p style={{ color: '#888', fontSize: '12px', marginBottom: '16px' }}>
-                Intel pasar umum untuk referensi cepat dan estimasi harga global.
+                Harga Pasar Hari ini untuk Referensi Cepat.
             </p>
 
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px', flexWrap: 'wrap', gap: '8px' }}>
@@ -493,6 +522,11 @@ export default function MarketIntel({ token }) {
                                 <div style={{ fontSize: '10px', color: '#fda4af', lineHeight: 1.4 }}>
                                     Sell: {entry.topSell || '—'}
                                 </div>
+                                {entry.offerText ? (
+                                    <div style={{ fontSize: '10px', color: '#fef3c7', lineHeight: 1.4, marginTop: '2px' }}>
+                                        Offer: {entry.offerText}
+                                    </div>
+                                ) : null}
                             </div>
                         </div>
                         );

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { getCompaniesByUserId, fetchWarera } from '../api/apiClient';
 import { AE_PP_PER_DAY, calculateCompanyProduction } from './production';
 
@@ -12,73 +12,105 @@ export default function CompanyAnalysis({ userId, token }) {
   const [regionsDict, setRegionsDict] = useState({});
   const [countriesDict, setCountriesDict] = useState({});
   const [expandedId, setExpandedId] = useState(null);
+  const pendingGeoLookupsRef = useRef(new Set());
 
-useEffect(() => {
-    const initData = async () => {
+  const loadGeographyContext = async (companies = []) => {
+    if (!token) return;
 
-      // Ambil data dari kedua endpoint secara bersamaan (lebih cepat)
-      const [countriesRes, regionsRes] = await Promise.all([
-        fetchWarera('country.getAllCountries', {}, token),
+    const [countriesRes, regionsRes] = await Promise.all([
+      fetchWarera('country.getAllCountries', {}, token),
+      fetchWarera('region.getRegionsObject', {}, token),
+    ]);
 
-        fetchWarera('region.getRegionsObject', {}, token)
+    const countries = Array.isArray(countriesRes?.data) ? countriesRes.data : [];
+    const regionsObj = regionsRes?.success && regionsRes.data && typeof regionsRes.data === 'object'
+      ? regionsRes.data
+      : {};
+
+    const governmentResults = await Promise.all(
+      countries.map((country) => fetchWarera('government.getByCountryId', { countryId: country._id }, token))
+    );
+
+    const enrichedCountries = countries.map((country, index) => {
+      const govRes = governmentResults[index];
+      return {
+        ...country,
+        ...(govRes?.success ? { government: govRes.data } : {}),
+      };
+    });
+
+    const combinedRegions = { ...regionsObj };
+
+    enrichedCountries.forEach((country) => {
+      if (Array.isArray(country.regions)) {
+        country.regions.forEach((regionId) => {
+          if (combinedRegions[regionId]) {
+            combinedRegions[regionId] = {
+              ...combinedRegions[regionId],
+              countryData: country,
+            };
+          }
+        });
+      }
+    });
+
+    setCountriesDict(enrichedCountries.reduce((acc, country) => ({ ...acc, [country._id]: country }), {}));
+    setRegionsDict(combinedRegions);
+  };
+
+  const resolveGeoDetails = async (regionId, countryId) => {
+    if (!token || !regionId || pendingGeoLookupsRef.current.has(regionId)) return;
+
+    pendingGeoLookupsRef.current.add(regionId);
+
+    try {
+      const [regionRes, countryRes] = await Promise.all([
+        fetchWarera('region.getById', { regionId }, token),
+        countryId ? fetchWarera('country.getCountryById', { countryId }, token) : Promise.resolve({ success: false }),
       ]);
 
-      if (countriesRes.success && regionsRes.success) {
-        const countries = countriesRes.data;
-        const regionsObj = regionsRes.data; // Ini adalah raw object dari API
+      setRegionsDict((prev) => {
+        const next = { ...prev };
+        if (regionRes?.success && regionRes.data) {
+          next[regionId] = { ...(next[regionId] || {}), ...regionRes.data };
+        }
+        if (countryRes?.success && countryRes.data && countryId) {
+          const currentCountryData = next[regionId]?.countryData || {};
+          next[regionId] = {
+            ...(next[regionId] || {}),
+            countryData: {
+              ...currentCountryData,
+              ...countryRes.data,
+              _id: countryId,
+            },
+          };
+        }
+        return next;
+      });
 
-        // 2b. Ambil data pemerintahan (partai berkuasa) untuk tiap negara secara paralel
-        const governmentResults = await Promise.all(
-          countries.map(c => fetchWarera('government.getByCountryId', { countryId: c._id }, token))
-        );
-
-        countries.forEach((country, idx) => {
-          const govRes = governmentResults[idx];
-          if (govRes?.success) {
-            country.government = govRes.data;
-            // DEBUG: cek struktur asli response government di sini dulu,
-            // supaya kita tahu field pasti untuk ethnic bonus / nama partai.
-            // Hapus/comment log ini setelah field-nya dikonfirmasi.
-            console.log(`[government.getByCountryId] ${country.name}:`, govRes.data);
-          }
-        });
-
-        // 1. Simpan dictionary Negara
-        setCountriesDict(countries.reduce((acc, c) => ({ ...acc, [c._id]: c }), {}));
-
-        // 2. Gabungkan data: Masukkan info Negara langsung ke dalam tiap objek Region
-        // Supaya satu tempat (regionsDict) punya data "code", "deposit", sekaligus data "country"
-        const combinedRegions = { ...regionsObj };
-
-        countries.forEach(country => {
-          if (Array.isArray(country.regions)) {
-            country.regions.forEach(rId => {
-              // Jika ID region ini ada di dalam data regionsObj dari server
-              if (combinedRegions[rId]) {
-                // Tempelkan data negara utuh (atau cukup ID negaranya) ke dalam region tersebut
-                combinedRegions[rId].countryData = country;
-              } else {
-                // DEBUG: region ID dari country.regions tidak ketemu di regionsObj.
-                // Kalau ini muncul terus untuk region tempat company kamu berada,
-                // itu sebabnya "Lokasi Negara" muncul "Unknown".
-                console.warn(`[region mismatch] Region ID "${rId}" dari negara "${country.name}" tidak ditemukan di regionsObj`);
-              }
-            });
-          }
-        });
-
-        // Simpan hasil penggabungan yang super lengkap ini ke dalam state
-        setRegionsDict(combinedRegions);
-
+      if (countryRes?.success && countryId) {
+        setCountriesDict((prev) => ({
+          ...prev,
+          [countryId]: {
+            ...(prev[countryId] || {}),
+            ...countryRes.data,
+            _id: countryId,
+          },
+        }));
       }
-    };
+    } catch {
+      // ignore lookup errors to keep the UI responsive
+    } finally {
+      pendingGeoLookupsRef.current.delete(regionId);
+    }
+  };
 
+  useEffect(() => {
     if (token) {
-      initData();
-
+      loadGeographyContext();
     }
   }, [token]);
- 
+
 
   useEffect(() => {
     if (!userId) {
@@ -94,6 +126,7 @@ useEffect(() => {
     const result = await getCompaniesByUserId(userId, token);
     if (result.success) {
       setData(result);
+      await loadGeographyContext(result.companies || []);
     } else {
       setErrorMsg(result.error);
     }
@@ -105,6 +138,35 @@ useEffect(() => {
     const val = typeof c?.production === 'number' ? c.production : 0;
     return sum + val;
   }, 0);
+
+  const totalEstimatedValue = companies.reduce((sum, comp) => {
+    const val = typeof comp?.estimatedValue === 'number' ? comp.estimatedValue : 0;
+    return sum + val;
+  }, 0);
+
+  const totalProductionValue = companies.reduce((sum, comp) => {
+    const production = typeof comp?.production === 'number' ? comp.production : 0;
+    return sum + production;
+  }, 0);
+
+  const totalRevenueEstimate = companies.reduce((sum, comp) => {
+    const production = typeof comp?.production === 'number' ? comp.production : 0;
+    const estimatedValue = typeof comp?.estimatedValue === 'number' ? comp.estimatedValue : 0;
+    const fallbackPrice = estimatedValue > 0 ? estimatedValue / Math.max(production, 1) : 0;
+    const itemPrice = fallbackPrice;
+    return sum + (production * itemPrice);
+  }, 0);
+
+  const totalCostEstimate = companies.reduce((sum, comp) => {
+    const production = typeof comp?.production === 'number' ? comp.production : 0;
+    const concreteInvested = typeof comp?.concreteInvested === 'number' ? comp.concreteInvested : 0;
+    const storageLevel = comp?.activeUpgradeLevels?.storage ?? 0;
+    const engineLevel = comp?.activeUpgradeLevels?.automatedEngine ?? 0;
+    const upkeep = (concreteInvested * 0.05) + (storageLevel * 3) + (engineLevel * 2);
+    return sum + (production > 0 ? upkeep : 0);
+  }, 0);
+
+  const totalProfitEstimate = totalRevenueEstimate - totalCostEstimate;
 
   return (
     <div style={{ animation: 'fadeIn 0.4s ease' }}>
@@ -157,8 +219,9 @@ useEffect(() => {
 
               <SummaryStat label="Companies" value={companies.length} />
               <SummaryStat label="Total Produksi" value={`${totalProduction.toFixed(0)} u/hari`} />
-              <SummaryStat label="Pendapatan Harian" value="TBA" color="#4caf50" />
-              <SummaryStat label="Biaya Harian" value="TBA" color="#e74c3c" />
+              <SummaryStat label="Nilai Estimasi" value={`${totalEstimatedValue.toFixed(2)}`} color="#8ab4f8" />
+              <SummaryStat label="Pendapatan Harian" value={`${totalRevenueEstimate.toFixed(2)} /hari`} color="#4caf50" />
+              <SummaryStat label="Biaya Harian" value={`${totalCostEstimate.toFixed(2)} /hari`} color="#e74c3c" />
 
               <div style={{
                 marginLeft: 'auto', textAlign: 'center', background: 'rgba(0,0,0,0.4)',
@@ -167,7 +230,7 @@ useEffect(() => {
                 <div style={{ fontSize: '10px', color: '#888', textTransform: 'uppercase', marginBottom: '4px' }}>
                   Profit Harian
                 </div>
-                <div style={{ fontSize: '20px', fontWeight: 'bold', color: '#3498db' }}>TBA</div>
+                <div style={{ fontSize: '20px', fontWeight: 'bold', color: totalProfitEstimate >= 0 ? '#4caf50' : '#e74c3c' }}>{totalProfitEstimate.toFixed(2)}</div>
               </div>
             </div>
           </div>
@@ -179,6 +242,7 @@ useEffect(() => {
                 key={comp?._id || index}
                 comp={comp}
                 regionsDict={regionsDict}
+                resolveGeoDetails={resolveGeoDetails}
                 isExpanded={expandedId === (comp?._id || index)}
                 onToggle={() => setExpandedId(prev => prev === (comp?._id || index) ? null : (comp?._id || index))}
               />
@@ -206,7 +270,7 @@ function SummaryStat({ label, value, color = '#fff' }) {
   );
 }
 
-function CompanyListItem({ comp, regionsDict, isExpanded, onToggle }) {
+function CompanyListItem({ comp, regionsDict, resolveGeoDetails, isExpanded, onToggle }) {
   const aeLevel = comp?.activeUpgradeLevels?.automatedEngine ?? 0;
   const ppPerDay = AE_PP_PER_DAY[aeLevel];
 
@@ -225,8 +289,50 @@ function CompanyListItem({ comp, regionsDict, isExpanded, onToggle }) {
   // Hitung efisiensi tunggal menggunakan data hasil analisis geopolitik baru
   // (pajak, bonus strategis, bonus partai/etnis, dan bonus deposit wilayah)
   const { totalEfficiency, breakdownNotes } = calculateCompanyProduction(comp, regionData, countryData, partyData);
+  const productionDisplay = typeof comp?.production === 'number' ? `${comp.production.toFixed(0)} u/hari` : '—';
+  const storageUsed = typeof comp?.storageUsed === 'number' ? comp.storageUsed : 0;
+  const storageMax = typeof comp?.storageMax === 'number' ? comp.storageMax : null;
+  const storageCapacityText = storageMax !== null ? `${storageUsed} / ${storageMax}` : `${storageUsed} / —`;
+  const storagePercent = storageMax !== null && storageMax > 0 ? Math.min((storageUsed / storageMax) * 100, 100) : 0;
 
-  const locationText = countryData ? `${countryData.name} (${countryData.code?.toUpperCase()})` : 'Mencari data / Unknown';
+  useEffect(() => {
+    if (!resolveGeoDetails || !comp?.region) return;
+
+    const regionHasReadableName = Boolean(regionData?.name || regionData?.code || regionData?.displayName);
+    const countryHasReadableName = Boolean(countryData?.name || countryData?.code || countryData?.taxes?.market);
+
+    if (regionHasReadableName && countryHasReadableName) return;
+
+    resolveGeoDetails(comp.region, countryData?._id || countryData?.id || null);
+  }, [comp?.region, countryData?._id, countryData?.id, regionData?.name, regionData?.code, regionData?.displayName, countryData?.name, countryData?.code, countryData?.taxes?.market, resolveGeoDetails]);
+
+  const locationText = (() => {
+    const regionCode = regionData?.code || regionData?.name || comp?.region || null;
+    const countryName = countryData?.name || null;
+    const countryCode = countryData?.code?.toUpperCase?.() || null;
+    const depositType = regionData?.deposit?.type || null;
+    const depositBonus = regionData?.deposit?.bonusPercent;
+    const taxRate = countryData?.taxes?.market;
+
+    const parts = [];
+    if (regionCode) parts.push(regionCode);
+    if (countryName) parts.push(countryName);
+    if (countryCode) parts.push(`(${countryCode})`);
+
+    const summary = parts.join(' · ');
+    const detailParts = [];
+    if (taxRate !== undefined && taxRate !== null) detailParts.push(`${Number(taxRate).toFixed(0)}% Income tax`);
+    if (depositType) {
+      const bonusText = depositBonus !== undefined && depositBonus !== null ? `${Number(depositBonus).toFixed(0)}%` : 'bonus';
+      detailParts.push(`Bonus +${bonusText} deposit (${depositType})`);
+    }
+
+    if (summary) {
+      return detailParts.length ? `${summary}\n${detailParts.join(' · ')}` : summary;
+    }
+
+    return comp?.region ? 'Data lokasi belum tersedia' : '—';
+  })();
 
   return (
     <div style={{ background: 'rgba(20, 20, 25, 0.5)', border: '1px solid #333', borderRadius: '10px', overflow: 'hidden' }}>
@@ -249,9 +355,9 @@ function CompanyListItem({ comp, regionsDict, isExpanded, onToggle }) {
             <span style={{ fontWeight: 'bold', fontSize: '14px', color: '#fff' }}>
               {comp?.name || 'Unnamed Company'}
             </span>
-            {/* Total efisiensi dijadikan satu angka di kanan atas row */}
-            <span style={{ fontSize: '14px', fontWeight: 'bold', color: totalEfficiency >= 100 ? '#4caf50' : '#e74c3c' }}>
-              Prod: {totalEfficiency}%
+            {/* Nilai produksi sekarang diambil dari data perusahaan, bukan persentase hardcoded */}
+            <span style={{ fontSize: '14px', fontWeight: 'bold', color: totalEfficiency === null ? '#888' : totalEfficiency >= 100 ? '#4caf50' : '#e74c3c' }}>
+              {productionDisplay}
             </span>
           </div>
           <div style={{ fontSize: '12px', color: '#888', marginTop: '2px' }}>
@@ -277,7 +383,10 @@ function CompanyListItem({ comp, regionsDict, isExpanded, onToggle }) {
         <div style={{ padding: '0 16px 16px', borderTop: '1px solid #2a2a2a' }}>
           <div style={{ fontSize: '12px', color: '#aaa', marginTop: '12px', lineHeight: '1.6' }}>
 
-            <DetailRow label="Lokasi Negara" value={locationText} />
+            <div style={{ padding: '4px 0', borderBottom: '1px solid rgba(255,255,255,0.02)' }}>
+              <div style={{ color: '#777', fontSize: '11px', marginBottom: '3px' }}>Lokasi Negara</div>
+              <div style={{ color: '#fff', fontWeight: '500', whiteSpace: 'pre-line', lineHeight: 1.45 }}>{locationText}</div>
+            </div>
             <DetailRow label="Pekerja Aktif" value={comp?.workerCount !== undefined ? `${comp.workerCount} Orang` : '—'} />
             <DetailRow label="Engine Level" value={`Lv ${aeLevel}${ppPerDay !== undefined ? ` (${ppPerDay} PP/hari)` : ''}`} />
             <DetailRow label="Produksi Harian" value={typeof comp?.production === 'number' ? `${comp.production.toFixed(2)} ${comp?.itemCode || ''}/hari` : '—'} />
@@ -300,15 +409,15 @@ function CompanyListItem({ comp, regionsDict, isExpanded, onToggle }) {
             <div style={{ marginTop: '12px', padding: '10px', background: 'rgba(0,0,0,0.3)', borderRadius: '6px', border: '1px solid #333' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11px', color: '#aaa', marginBottom: '6px' }}>
                 <span>Kapasitas Storage</span>
-                <span style={{ color: comp?.storageUsed >= (comp?.storageMax || 800) ? '#e74c3c' : '#4caf50', fontWeight: 'bold' }}>
-                  {comp?.storageUsed || 0} / {comp?.storageMax || 800}
+                <span style={{ color: storageMax !== null && storageUsed >= storageMax ? '#e74c3c' : '#4caf50', fontWeight: 'bold' }}>
+                  {storageCapacityText}
                 </span>
               </div>
               <div style={{ width: '100%', height: '8px', background: '#222', borderRadius: '4px', overflow: 'hidden' }}>
                 <div style={{
-                  width: `${Math.min(((comp?.storageUsed || 0) / (comp?.storageMax || 800)) * 100, 100)}%`,
+                  width: `${storagePercent}%`,
                   height: '100%',
-                  background: comp?.storageUsed >= (comp?.storageMax || 800) ? '#e74c3c' : '#4caf50',
+                  background: storageMax !== null && storageUsed >= storageMax ? '#e74c3c' : '#4caf50',
                   transition: 'width 0.4s ease'
                 }} />
               </div>

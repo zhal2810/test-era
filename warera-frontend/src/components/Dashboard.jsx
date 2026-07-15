@@ -149,13 +149,13 @@ export default function Dashboard() {
         {/* TABS */}
         <div style={{ display: 'flex', gap: '4px' }}>
           <button style={getTabStyle('economy')} onClick={() => setActiveTab('economy')}>
-            📊 Dompet Ekonomi
+             Transaction 
           </button>
           <button style={getTabStyle('company')} onClick={() => setActiveTab('company')}>
-            🏭 Company Analysis
+             Your Company
           </button>
           <button style={getTabStyle('market')} onClick={() => setActiveTab('market')}>
-            📈 Market Intel
+            Market
           </button>
         </div>
 
@@ -302,9 +302,9 @@ export default function Dashboard() {
         {/* TAB: MARKET INTEL */}
         {activeTab === 'market' && (
           <div style={cardStyle}>
-            <h2 style={{ margin: '0 0 10px 0', color: '#3498db' }}>📈 Market Chronicle</h2>
+            <h2 style={{ margin: '0 0 10px 0', color: '#3498db' }}>Market</h2>
             <p style={{ color: '#aaa', fontSize: '12px', marginBottom: '15px' }}>
-              Harga pasar global terkini (Global average prices).
+             Harga Pasar Hari ini
             </p>
             <MarketIntel token={config.token} />
           </div>
