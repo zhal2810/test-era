@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { getCompaniesByUserId, fetchWarera } from '../api/apiClient';
+import { AE_PP_PER_DAY, calculateCompanyProduction } from './production';
 
 
 export default function CompanyAnalysis({ userId, token }) {

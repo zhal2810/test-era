@@ -1,5 +1,5 @@
 import React from 'react';
-import { AE_PP_PER_DAY, MAX_AE_LEVEL, calculateCompanyProduction } from '../utils/production';
+import { AE_PP_PER_DAY, MAX_AE_LEVEL, calculateCompanyProduction } from './production';
 
 function AeProgressBar({ level }) {
   const filled = '█'.repeat(level);
