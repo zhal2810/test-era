@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { getCompaniesByUserId, getProductionBonus, fetchWarera } from '../api/apiClient';
-import { AE_PP_PER_DAY } from './production';
+import { getCompaniesByUserId, getProductionBonus, getWorkersByUserId, getUserEcoSkills, fetchWarera } from '../api/apiClient';
+import { AE_PP_PER_DAY, calculateWorkerDailyOutput } from './production';
 
 export default function CompanyAnalysis({ userId, token }) {
   const [isLoading, setIsLoading] = useState(false);
@@ -9,6 +9,7 @@ export default function CompanyAnalysis({ userId, token }) {
 
   const [regionsDict, setRegionsDict] = useState({});
   const [productionBonusDict, setProductionBonusDict] = useState({});
+  const [workersByCompanyId, setWorkersByCompanyId] = useState({});
   const [expandedId, setExpandedId] = useState(null);
   const [marketPrices, setMarketPrices] = useState({});
 
@@ -75,6 +76,36 @@ export default function CompanyAnalysis({ userId, token }) {
       const priceRes = await fetchWarera('itemTrading.getPrices', {}, token);
       if (priceRes.success && priceRes.data) setMarketPrices(priceRes.data);
       await loadProductionBonuses(result.companies || []);
+
+      // 1x panggilan untuk SEMUA company sekaligus (bukan per-company)
+      const workersRes = await getWorkersByUserId(userId, token);
+      if (workersRes.success) {
+        const workersByCompany = workersRes.data;
+
+        // Kumpulkan userId unik semua worker (across semua company),
+        // biar tiap worker cuma di-fetch skill-nya sekali walau kerja di >1 company.
+        const uniqueUserIds = [...new Set(
+          Object.values(workersByCompany).flat().map((w) => w?.user).filter(Boolean)
+        )];
+
+        const skillsResults = await Promise.all(
+          uniqueUserIds.map((uid) => getUserEcoSkills(uid, token))
+        );
+        const skillsByUserId = uniqueUserIds.reduce((acc, uid, index) => {
+          acc[uid] = skillsResults[index]?.data || { energyValue: 0, productionValue: 0 };
+          return acc;
+        }, {});
+
+        // Tempel skill ke tiap worker
+        const enrichedWorkersByCompany = Object.fromEntries(
+          Object.entries(workersByCompany).map(([companyId, workerList]) => [
+            companyId,
+            workerList.map((w) => ({ ...w, ...(skillsByUserId[w?.user] || {}) })),
+          ])
+        );
+
+        setWorkersByCompanyId(enrichedWorkersByCompany);
+      }
     } else {
       setErrorMsg(result.error);
     }
@@ -105,6 +136,7 @@ export default function CompanyAnalysis({ userId, token }) {
               comp={comp}
               regionsDict={regionsDict}
               productionBonus={comp?._id ? productionBonusDict[comp._id] : undefined}
+              workers={comp?._id ? (workersByCompanyId[comp._id] || []) : []}
               isExpanded={expandedId === (comp?._id || index)}
               onToggle={() => setExpandedId(prev => prev === (comp?._id || index) ? null : (comp?._id || index))}
               marketPrices={marketPrices}
@@ -115,7 +147,7 @@ export default function CompanyAnalysis({ userId, token }) {
     </div>
   );
 }
-function CompanyListItem({ comp, regionsDict, resolveGeoDetails, productionBonus, isExpanded, onToggle, marketPrices }) {
+function CompanyListItem({ comp, regionsDict, resolveGeoDetails, productionBonus, isExpanded, onToggle, marketPrices, workers = [] }) {
   // 1. DEFINISI LEVEL DULU (Paling atas)
   const aeLevel = Number(comp?.activeUpgradeLevels?.automatedEngine ?? comp?.automatedEngine ?? 0);
   const ppPerDay = AE_PP_PER_DAY?.[aeLevel] ?? 0;
@@ -333,8 +365,23 @@ function CompanyListItem({ comp, regionsDict, resolveGeoDetails, productionBonus
             const basePP = ppPerDay || 0;
             const bonusPercent = productionBonus?.total || 0;
             const enginePPWithBonus = basePP * (1 + (bonusPercent / 100));
-            const workers = comp?.workerCount || 0;
-            const totalPP = enginePPWithBonus;
+            // Data worker ASLI (worker.getWorkers + skill dari user.getUserById),
+            // dihitung pakai konstanta resmi dari gameConfig.getGameConfig.
+            const activeWorkers = Array.isArray(workers) ? workers : [];
+            const workerCount = activeWorkers.length || comp?.workerCount || 0;
+            const workerBreakdowns = activeWorkers.map((w) => ({
+              ...w,
+              ...calculateWorkerDailyOutput({
+                energyMax: w?.energyValue || 0,
+                productionValue: w?.productionValue || 0,
+                wagePerPP: w?.wage || 0,
+                fidelity: w?.fidelity || 0,
+                companyBonusPercent: bonusPercent,
+              }),
+            }));
+            const workersBoostedPPPerDay = workerBreakdowns.reduce((sum, w) => sum + w.boostedPPPerDay, 0);
+            const workersWagePerDay = workerBreakdowns.reduce((sum, w) => sum + w.wagePerDay, 0);
+            const totalPP = enginePPWithBonus + workersBoostedPPPerDay;
 
             // 3. Estimasi Produksi & Harga
             const dailyProduction = productionValue || 0;
@@ -346,9 +393,9 @@ function CompanyListItem({ comp, regionsDict, resolveGeoDetails, productionBonus
 
             const grossRevenue = dailyProduction * itemPrice;
 
-            // 4. Upkeep & Profit
+            // 4. Upkeep & Profit (sekarang termasuk wage yang dibayar ke worker)
             const concreteInvested = comp?.concreteInvested || 0;
-            const upkeep = (concreteInvested * 0.05) + (storageLevel * 3) + (aeLevel * 2);
+            const upkeep = (concreteInvested * 0.05) + (storageLevel * 3) + (aeLevel * 2) + workersWagePerDay;
             const netProfit = grossRevenue - upkeep;
 
             return (
@@ -363,7 +410,28 @@ function CompanyListItem({ comp, regionsDict, resolveGeoDetails, productionBonus
                   <DetailRow label="Production bonus" value={`+${bonusPercent.toFixed(2)}%`} valueColor="#10b981" />
                   <div style={{ borderTop: '1px dashed #334155', margin: '8px 0' }}></div>
                   <DetailRow label="Engine PP (with bonus)" value={`${enginePPWithBonus.toFixed(2)} PP`} />
-                  <DetailRow label={`Workers (${workers})`} value="0.00 PP" />
+                </div>
+
+               
+                <div style={{ background: '#0f172a', padding: '16px', borderRadius: '8px', border: '1px solid #334155' }}>
+                  <div style={{ fontWeight: '600', color: '#f8fafc', marginBottom: '12px', fontSize: '13px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    👷 Workers ({workerCount})
+                  </div>
+                  {workerBreakdowns.length === 0 ? (
+                    <div style={{ color: '#64748b', fontSize: '12px' }}>Butuh Token Untuk Menggunakan Workers</div>
+                  ) : (
+                    <>
+                      {workerBreakdowns.map((w) => (
+                        <div key={w._id || w.user} style={{ marginBottom: '8px', paddingBottom: '8px', borderBottom: '1px dashed #334155' }}>
+                          <DetailRow label={`PP/hari (fidelity +${w.fidelityBonusPercent.toFixed(0)}%)`} value={`${w.boostedPPPerDay.toFixed(2)} PP`} valueColor="#10b981" />
+                          <DetailRow label="Wage/hari" value={`-${w.wagePerDay.toFixed(3)}`} valueColor="#ef4444" />
+                        </div>
+                      ))}
+                      <DetailRow label="Total PP worker/hari" value={`${workersBoostedPPPerDay.toFixed(2)} PP`} isBold={true} />
+                      <div style={{ color: '#64748b', fontSize: '10.5px', marginTop: '6px', lineHeight: '1.4' }}>
+                      </div>
+                    </>
+                  )}
                 </div>
 
                 {/* KOTAK 2: DAILY SUMMARY */}
@@ -372,7 +440,7 @@ function CompanyListItem({ comp, regionsDict, resolveGeoDetails, productionBonus
                     📊 Daily Summary
                   </div>
                   <DetailRow label="Total PP / day" value={`${totalPP.toFixed(2)} PP`} />
-                  <DetailRow label="Production" value={`${dailyProduction.toFixed(0)} ${comp?.itemCode || ''}/day`} />
+                  <DetailRow label="Production" value={`${dailyProduction.toFixed(0)} ${comp?.itemCode || ''}`} />
                   <DetailRow label="Market price / unit" value={itemPrice > 0 ? itemPrice.toFixed(3) : '—'} />
                   <DetailRow label="Market revenue" value={`+${grossRevenue.toFixed(3)}`} valueColor="#10b981" />
                   <DetailRow label="Upkeep / Wage costs" value={`-${upkeep.toFixed(3)}`} valueColor="#ef4444" />

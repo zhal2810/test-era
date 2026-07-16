@@ -117,6 +117,43 @@ export const getProductionBonus = async (companyId, token = null) => {
   }
 };
 
+// Mengambil semua worker milik SEMUA company sekaligus (1x panggilan),
+// dikelompokkan per companyId. Endpoint publik, tidak butuh token.
+export const getWorkersByUserId = async (userId, token = null) => {
+  try {
+    const result = await fetchWarera('worker.getWorkers', { userId, perPage: 100 }, token);
+    if (!result.success) throw new Error(result.error);
+
+    const groups = Array.isArray(result.data?.workersPerCompany) ? result.data.workersPerCompany : [];
+    const workersByCompanyId = groups.reduce((acc, group) => {
+      const companyId = group?.company?._id || group?.company?.id;
+      if (companyId) acc[companyId] = Array.isArray(group.workers) ? group.workers : [];
+      return acc;
+    }, {});
+
+    return { success: true, data: workersByCompanyId };
+  } catch (err) {
+    return { success: false, error: err.message, data: {} };
+  }
+};
+
+// Ambil skill Energy & Production seorang worker dari profilnya sendiri
+// (worker.getWorkers tidak menyertakan skill, cuma wage/fidelity).
+export const getUserEcoSkills = async (userId, token = null) => {
+  try {
+    const result = await fetchWarera('user.getUserById', { userId }, token);
+    if (!result.success) throw new Error(result.error);
+
+    const skills = result.data?.skills || {};
+    const energyValue = skills?.energy?.total ?? skills?.energy?.value ?? 0;
+    const productionValue = skills?.production?.total ?? skills?.production?.value ?? 0;
+
+    return { success: true, data: { energyValue, productionValue } };
+  } catch (err) {
+    return { success: false, error: err.message, data: { energyValue: 0, productionValue: 0 } };
+  }
+};
+
 // Mengambil data statistik historis pasar dari server proxy lokal
 export const getMarketStats = async () => {
   try {
