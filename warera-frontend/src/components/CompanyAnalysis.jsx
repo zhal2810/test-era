@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { getCompaniesByUserId, getProductionBonus, fetchWarera } from '../api/apiClient';
-import { AE_PP_PER_DAY } from './production';
+
 
 
 export default function CompanyAnalysis({ userId, token }) {
