@@ -105,6 +105,21 @@ export const getItemOfferById = async (itemOfferId, token = null) => {
   }
 };
 
+// Data statis game (skills, upgrade levels, items & productionPoints, dll).
+// Dipakai terutama buat ambil map itemCode -> productionPoints (butuh berapa
+// PP untuk hasilkan 1 unit item), supaya konversi PP->unit produksi akurat.
+export const getGameConfig = async (token = null) => {
+  try {
+    const result = await fetchWarera('gameConfig.getGameConfig', {}, token);
+    if (!result.success) throw new Error(result.error);
+    return { success: true, data: result.data };
+  } catch (err) {
+    return { success: false, error: err.message, data: null };
+  }
+};
+
+// Mengambil semua worker milik SEMUA company sekaligus (1x panggilan),
+// dikelompokkan per companyId. Endpoint publik, tidak butuh token.
 // Endpoint resmi server-side untuk production bonus sebuah company.
 // Return shape: { strategicBonus, depositBonus, ethicSpecializationBonus, ethicDepositBonus, total }
 export const getProductionBonus = async (companyId, token = null) => {
@@ -117,8 +132,6 @@ export const getProductionBonus = async (companyId, token = null) => {
   }
 };
 
-// Mengambil semua worker milik SEMUA company sekaligus (1x panggilan),
-// dikelompokkan per companyId. Endpoint publik, tidak butuh token.
 export const getWorkersByUserId = async (userId, token = null) => {
   try {
     const result = await fetchWarera('worker.getWorkers', { userId, perPage: 100 }, token);

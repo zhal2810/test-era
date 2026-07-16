@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { getCompaniesByUserId, getProductionBonus, getWorkersByUserId, getUserEcoSkills, fetchWarera } from '../api/apiClient';
+import { getCompaniesByUserId, getProductionBonus, getWorkersByUserId, getUserEcoSkills, getGameConfig, fetchWarera } from '../api/apiClient';
 import { AE_PP_PER_DAY, calculateWorkerDailyOutput } from './production';
 
 export default function CompanyAnalysis({ userId, token }) {
@@ -12,6 +12,9 @@ export default function CompanyAnalysis({ userId, token }) {
   const [workersByCompanyId, setWorkersByCompanyId] = useState({});
   const [expandedId, setExpandedId] = useState(null);
   const [marketPrices, setMarketPrices] = useState({});
+  // Map itemCode -> { productionPoints, ... } dari gameConfig.getGameConfig.
+  // Statis per sesi game, jadi cukup di-fetch sekali (bukan per company).
+  const [itemsConfig, setItemsConfig] = useState({});
 
   const loadProductionBonuses = async (companies = []) => {
     const ids = companies.map((c) => c?._id).filter(Boolean);
@@ -57,6 +60,17 @@ export default function CompanyAnalysis({ userId, token }) {
 
   useEffect(() => {
     loadGeographyContext();
+  }, []);
+
+  useEffect(() => {
+    // gameConfig statis (termasuk map itemCode -> productionPoints) — cukup
+    // sekali per mount, tidak perlu diulang tiap handleAnalyse/per-company.
+    (async () => {
+      const cfgRes = await getGameConfig(token);
+      if (cfgRes.success && cfgRes.data?.items) {
+        setItemsConfig(cfgRes.data.items);
+      }
+    })();
   }, []);
 
   useEffect(() => {
@@ -140,6 +154,7 @@ export default function CompanyAnalysis({ userId, token }) {
               isExpanded={expandedId === (comp?._id || index)}
               onToggle={() => setExpandedId(prev => prev === (comp?._id || index) ? null : (comp?._id || index))}
               marketPrices={marketPrices}
+              itemsConfig={itemsConfig}
             />
           ))}
         </div>
@@ -147,7 +162,7 @@ export default function CompanyAnalysis({ userId, token }) {
     </div>
   );
 }
-function CompanyListItem({ comp, regionsDict, resolveGeoDetails, productionBonus, isExpanded, onToggle, marketPrices, workers = [] }) {
+function CompanyListItem({ comp, regionsDict, resolveGeoDetails, productionBonus, isExpanded, onToggle, marketPrices, workers = [], itemsConfig = {} }) {
   // 1. DEFINISI LEVEL DULU (Paling atas)
   const aeLevel = Number(comp?.activeUpgradeLevels?.automatedEngine ?? comp?.automatedEngine ?? 0);
   const ppPerDay = AE_PP_PER_DAY?.[aeLevel] ?? 0;
@@ -211,7 +226,12 @@ function CompanyListItem({ comp, regionsDict, resolveGeoDetails, productionBonus
     return notes;
   })();
 
-  const productionDisplay = productionValue !== null ? `${productionValue.toFixed(2)} u/hari` : '—';
+  // PENTING: comp.production adalah STOK SAAT INI di gudang (sama persis dengan
+  // angka yang dipakai progress bar storage), BUKAN laju produksi per hari.
+  // Label diganti dari "u/hari" -> "di gudang" supaya tidak menyesatkan.
+  // Laju produksi harian yang benar (dari Engine+Worker) ada di panel
+  // "Daily Summary" saat card di-expand.
+  const productionDisplay = productionValue !== null ? `${productionValue.toFixed(2)} di gudang` : '—';
   const effectiveStorageUsed = storageUsed ?? 0;
   const effectiveStorageMax = maxStorage ?? null;
   const storageCapacityText = effectiveStorageMax !== null
@@ -292,7 +312,7 @@ function CompanyListItem({ comp, regionsDict, resolveGeoDetails, productionBonus
           <div style={{ fontSize: '12px', color: '#888', marginTop: '2px' }}>
             {comp?.itemCode ? `${comp.itemCode.toUpperCase()} · ` : ''}Engine Lv{aeLevel}
             {ppPerDay !== undefined ? ` (${ppPerDay} PP)` : ''}
-            {typeof comp?.production === 'number' ? ` · ${comp.production.toFixed(0)} u/hari` : ''}
+            {typeof comp?.production === 'number' ? ` · ${comp.production.toFixed(0)} di gudang` : ''}
           </div>
         </div>
 
@@ -384,7 +404,17 @@ function CompanyListItem({ comp, regionsDict, resolveGeoDetails, productionBonus
             const totalPP = enginePPWithBonus + workersBoostedPPPerDay;
 
             // 3. Estimasi Produksi & Harga
-            const dailyProduction = productionValue || 0;
+            // PENTING: dailyProduction HARUS dari totalPP (hasil kalkulasi Engine+Worker),
+            // BUKAN dari `productionValue`/comp.production — itu field stok gudang saat ini
+            // (dipakai buat progress bar storage), bukan laju produksi harian.
+            //
+            // Konversi PP -> unit item TIDAK 1:1. Tiap item butuh sejumlah PP
+            // tertentu untuk hasilkan 1 unit (field `productionPoints` di
+            // gameConfig.getGameConfig -> items). Contoh: fish butuh 40 PP/unit,
+            // limestone cuma 1 PP/unit. Fallback ke 1 kalau data belum ke-load
+            // supaya tidak divide-by-zero / NaN.
+            const ppPerUnit = itemsConfig?.[comp?.itemCode]?.productionPoints || 1;
+            const dailyProduction = ppPerUnit > 0 ? (totalPP || 0) / ppPerUnit : 0;
 
             // Gunakan harga asli dari API jika ada. Jika belum di-load, fallback ke estimasi.
             const itemPrice = realPrice > 0
@@ -393,9 +423,16 @@ function CompanyListItem({ comp, regionsDict, resolveGeoDetails, productionBonus
 
             const grossRevenue = dailyProduction * itemPrice;
 
-            // 4. Upkeep & Profit (sekarang termasuk wage yang dibayar ke worker)
-            const concreteInvested = comp?.concreteInvested || 0;
-            const upkeep = (concreteInvested * 0.05) + (storageLevel * 3) + (aeLevel * 2) + workersWagePerDay;
+            // 4. Upkeep & Profit
+            // Upkeep SEBELUMNYA pakai formula karangan: (concreteInvested*0.05)
+            // + (storageLevel*3) + (aeLevel*2) — angka2 itu tidak ada sumbernya
+            // dari API/gameConfig manapun. Dicek di gameConfig.getGameConfig ->
+            // "company": tidak ada field maintenanceCost/upkeep sama sekali
+            // (beda dengan headquarters/bunker/base yang eksplisit punya
+            // maintenanceCost). Jadi company kemungkinan besar TIDAK punya
+            // biaya perawatan rutin — satu-satunya biaya real yang terverifikasi
+            // adalah wage ke worker.
+            const upkeep = workersWagePerDay;
             const netProfit = grossRevenue - upkeep;
 
             return (
@@ -440,7 +477,7 @@ function CompanyListItem({ comp, regionsDict, resolveGeoDetails, productionBonus
                     📊 Daily Summary
                   </div>
                   <DetailRow label="Total PP / day" value={`${totalPP.toFixed(2)} PP`} />
-                  <DetailRow label="Production" value={`${dailyProduction.toFixed(0)} ${comp?.itemCode || ''}`} />
+                  <DetailRow label="Production" value={`${dailyProduction.toFixed(2)} ${comp?.itemCode || ''} / hari`} />
                   <DetailRow label="Market price / unit" value={itemPrice > 0 ? itemPrice.toFixed(3) : '—'} />
                   <DetailRow label="Market revenue" value={`+${grossRevenue.toFixed(3)}`} valueColor="#10b981" />
                   <DetailRow label="Upkeep / Wage costs" value={`-${upkeep.toFixed(3)}`} valueColor="#ef4444" />
