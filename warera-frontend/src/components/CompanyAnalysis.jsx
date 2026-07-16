@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { getCompaniesByUserId, fetchWarera } from '../api/apiClient';
-import { AE_PP_PER_DAY, calculateCompanyProduction } from './production';
+import { getCompaniesByUserId, getProductionBonus, fetchWarera } from '../api/apiClient';
+import { AE_PP_PER_DAY } from './production';
 
 
 export default function CompanyAnalysis({ userId, token }) {
@@ -11,8 +11,29 @@ export default function CompanyAnalysis({ userId, token }) {
   // STATE UNTUK KAMUS
   const [regionsDict, setRegionsDict] = useState({});
   const [countriesDict, setCountriesDict] = useState({});
+  const [productionBonusDict, setProductionBonusDict] = useState({});
   const [expandedId, setExpandedId] = useState(null);
   const pendingGeoLookupsRef = useRef(new Set());
+
+  const loadProductionBonuses = async (companies = []) => {
+    if (!token) return;
+    const ids = companies.map((c) => c?._id).filter(Boolean);
+    if (ids.length === 0) return;
+
+    const results = await Promise.all(
+      ids.map((companyId) => getProductionBonus(companyId, token))
+    );
+
+    setProductionBonusDict((prev) => {
+      const next = { ...prev };
+      ids.forEach((companyId, index) => {
+        if (results[index]?.success) {
+          next[companyId] = results[index].data;
+        }
+      });
+      return next;
+    });
+  };
 
   const loadGeographyContext = async (companies = []) => {
     if (!token) return;
@@ -126,7 +147,10 @@ export default function CompanyAnalysis({ userId, token }) {
     const result = await getCompaniesByUserId(userId, token);
     if (result.success) {
       setData(result);
-      await loadGeographyContext(result.companies || []);
+      await Promise.all([
+        loadGeographyContext(result.companies || []),
+        loadProductionBonuses(result.companies || []),
+      ]);
     } else {
       setErrorMsg(result.error);
     }
@@ -243,6 +267,7 @@ export default function CompanyAnalysis({ userId, token }) {
                 comp={comp}
                 regionsDict={regionsDict}
                 resolveGeoDetails={resolveGeoDetails}
+                productionBonus={comp?._id ? productionBonusDict[comp._id] : undefined}
                 isExpanded={expandedId === (comp?._id || index)}
                 onToggle={() => setExpandedId(prev => prev === (comp?._id || index) ? null : (comp?._id || index))}
               />
@@ -270,7 +295,7 @@ function SummaryStat({ label, value, color = '#fff' }) {
   );
 }
 
-function CompanyListItem({ comp, regionsDict, resolveGeoDetails, isExpanded, onToggle }) {
+function CompanyListItem({ comp, regionsDict, resolveGeoDetails, productionBonus, isExpanded, onToggle }) {
   const aeLevel = comp?.activeUpgradeLevels?.automatedEngine ?? 0;
   const ppPerDay = AE_PP_PER_DAY[aeLevel];
 
@@ -279,16 +304,50 @@ function CompanyListItem({ comp, regionsDict, resolveGeoDetails, isExpanded, onT
   const regionData = regionsDict[regionId];
   const countryData = regionData?.countryData;
 
-  // Data partai berkuasa (untuk ethnic bonus) — field asli belum 100% dikonfirmasi,
-  // jadi kita coba beberapa kemungkinan nama field dari response government.getByCountryId.
-  // Cek console log "[government.getByCountryId]" untuk memastikan struktur asli,
-  // lalu sesuaikan path di bawah ini kalau perlu.
-  const government = countryData?.government;
-  const partyData = government?.rulingParty || government?.party || government?.president?.party || null;
+  // Catatan: rulingParty di API asli ada di countryData.rulingParty (string ID).
+  // Ini cuma info partai berkuasa untuk ditampilkan.
+  const rulingPartyId = countryData?.rulingParty || null;
 
-  // Hitung efisiensi tunggal menggunakan data hasil analisis geopolitik baru
-  // (pajak, bonus strategis, bonus partai/etnis, dan bonus deposit wilayah)
-  const { totalEfficiency, breakdownNotes } = calculateCompanyProduction(comp, regionData, countryData, partyData);
+  // Production bonus SEKARANG diambil langsung dari endpoint resmi server
+  // company.getProductionBonus, bukan dihitung ulang manual di frontend.
+  // Shape: { strategicBonus, depositBonus, ethicSpecializationBonus, ethicDepositBonus, total }
+  const totalEfficiency = productionBonus ? 100 + (productionBonus.total || 0) : null;
+
+  const breakdownNotes = (() => {
+    if (!productionBonus) {
+      return ['⏳ Memuat data production bonus dari server...'];
+    }
+    const notes = [];
+    const { strategicBonus = 0, depositBonus = 0, ethicSpecializationBonus = 0, ethicDepositBonus = 0, total = 0 } = productionBonus;
+
+    notes.push(strategicBonus !== 0
+      ? `${strategicBonus > 0 ? '+' : ''}${strategicBonus}% Bonus Strategis Negara`
+      : `0% Tidak ada Bonus Strategis`);
+
+    notes.push(depositBonus !== 0
+      ? `+${depositBonus}% Bonus Deposit Wilayah`
+      : `0% Tidak ada Bonus Deposit`);
+
+    notes.push(ethicSpecializationBonus !== 0
+      ? `+${ethicSpecializationBonus}% Bonus Spesialisasi Etnis/Partai`
+      : `0% Tidak ada Bonus Spesialisasi Etnis`);
+
+    notes.push(ethicDepositBonus !== 0
+      ? `+${ethicDepositBonus}% Bonus Deposit Etnis/Partai`
+      : `0% Tidak ada Bonus Deposit Etnis`);
+
+    if (countryData?.taxes?.market !== undefined && countryData?.taxes?.market !== null) {
+      notes.push(`ℹ️ ${countryData.taxes.market}% Pajak Pasar Negara (tidak memotong production, hanya berlaku saat jual/beli)`);
+    }
+
+    if (rulingPartyId) {
+      notes.push(`ℹ️ Partai berkuasa: ${rulingPartyId}`);
+    }
+
+    notes.push(`= ${total}% Total Production Bonus`);
+    return notes;
+  })();
+
   const productionDisplay = typeof comp?.production === 'number' ? `${comp.production.toFixed(0)} u/hari` : '—';
   const storageUsed = typeof comp?.storageUsed === 'number' ? comp.storageUsed : 0;
   const storageMax = typeof comp?.storageMax === 'number' ? comp.storageMax : null;

@@ -78,3 +78,15 @@ export const getItemOfferById = async (itemOfferId, token = null) => {
     return { success: false, error: err.message, data: null };
   }
 };
+
+// Endpoint resmi server-side untuk production bonus sebuah company.
+// Return shape: { strategicBonus, depositBonus, ethicSpecializationBonus, ethicDepositBonus, total }
+export const getProductionBonus = async (companyId, token = null) => {
+  try {
+    const result = await fetchWarera('company.getProductionBonus', { companyId }, token);
+    if (!result.success) throw new Error(result.error);
+    return { success: true, data: result.data };
+  } catch (err) {
+    return { success: false, error: err.message, data: null };
+  }
+};
