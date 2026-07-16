@@ -19,15 +19,16 @@ const WARERA_BASE_URL = 'https://api2.warera.io/trpc';
  */
 const handleWareraRequest = async (req, res) => {
   const { procedure } = req.params;
-  const { input } = req.body; // dikirim dari frontend sebagai { input: {...} }
+  const rawInput = req.method === 'GET' ? req.query : (req.body?.input ?? req.body ?? {});
+  const input = typeof rawInput === 'string' ? JSON.parse(rawInput) : (rawInput ?? {});
 
   const apiKey = req.headers['x-api-key'];
 
   try {
-    const response = await axios.post(
+    const response = await axios.get(
       `${WARERA_BASE_URL}/${procedure}`,
-      input ?? {}, // body ke WarEra = input itu sendiri, tidak dibungkus lagi
       {
+        params: input,
         headers: {
           'Content-Type': 'application/json',
           ...(apiKey ? { 'X-API-Key': apiKey } : {}),

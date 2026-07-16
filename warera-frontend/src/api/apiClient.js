@@ -13,7 +13,10 @@ export const fetchWarera = async (procedure, input, explicitToken = null) => {
       headers['X-API-Key'] = token;
     }
 
-    const response = await api.post(`/${procedure}`, { input }, { headers });
+    const response = await api.get(`/${procedure}`, {
+      headers,
+      params: input ?? {},
+    });
     return { success: true, data: normalizeWareraPayload(response.data) };
   } catch (error) {
     return { success: false, error: error.message, data: null };

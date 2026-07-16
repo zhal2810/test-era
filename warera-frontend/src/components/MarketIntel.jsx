@@ -291,34 +291,26 @@ export default function MarketIntel({ token }) {
                     }
                 })();
 
-                const wareraRes = await fetchWarera('itemTrading.getPrices', {}, token);
-                const statsRes = await axios.get('https://api.warerastats.io/items', {
-                    headers: {
-                        accept: '*/*',
-                        'accept-language': 'en-US,en;q=0.9,id;q=0.8',
-                        Referer: 'https://warerastats.io/',
-                    },
-                });
+                const wareraRes = await fetchWarera('itemTrading.getPrices', {});
+                
 
                 if (!cancelled) {
-                    const statsData = Array.isArray(statsRes?.data) ? statsRes.data : [];
-                    const statsMap = Object.fromEntries(
-                        statsData.map((entry) => [entry.itemCode || entry.item || entry.id, entry])
-                    );
-
                     const normalized = (wareraRes.success && wareraRes.data)
-                        ? normalizePrices(wareraRes.data, previousSnapshot, statsMap)
+                        ? normalizePrices(wareraRes.data, previousSnapshot, {})
                         : [];
 
                     const enriched = await Promise.all(normalized.map(async (entry) => {
                         try {
-                            const [orderRes, offerRes] = await Promise.all([
+                            const [orderRes, offerRes] = await Promise.allSettled([
                                 fetchWarera('tradingOrder.getTopOrders', { itemCode: entry.item, limit: 3 }, token),
                                 getItemOfferById(entry.item, token),
                             ]);
 
-                            const payload = orderRes.success ? orderRes.data : null;
-                            const offerSummary = summarizeOfferDetail(offerRes?.data ?? null);
+                            const orderResult = orderRes.status === 'fulfilled' ? orderRes.value : null;
+                            const offerResult = offerRes.status === 'fulfilled' ? offerRes.value : null;
+
+                            const payload = orderResult?.success ? orderResult.data : null;
+                            const offerSummary = summarizeOfferDetail(offerResult?.data ?? null);
                             const offerText = offerSummary
                                 ? `${offerSummary.side ? `${offerSummary.side} ` : ''}${offerSummary.price !== null ? `@ ${offerSummary.price.toFixed(2)}` : ''}${offerSummary.quantity !== null ? ` • ${formatVolume(offerSummary.quantity)}` : ''}`.trim()
                                 : null;
