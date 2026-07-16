@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { getCompaniesByUserId, getProductionBonus, fetchWarera } from '../api/apiClient';
+import { AE_PP_PER_DAY } from './production';
 
 
 
@@ -43,13 +44,29 @@ export default function CompanyAnalysis({ userId, token }) {
       fetchWarera('region.getRegionsObject', {}, token),
     ]);
 
-    const countries = Array.isArray(countriesRes?.data) ? countriesRes.data : [];
-    const regionsObj = regionsRes?.success && regionsRes.data && typeof regionsRes.data === 'object'
-      ? regionsRes.data
-      : {};
+    const countriesPayload = countriesRes?.data ?? countriesRes?.result?.data ?? countriesRes;
+    const regionsPayload = regionsRes?.data ?? regionsRes?.result?.data ?? regionsRes;
+
+    const normalizeCollection = (payload) => {
+      if (Array.isArray(payload)) return payload.filter(Boolean);
+      if (!payload || typeof payload !== 'object') return [];
+      if (Array.isArray(payload.items)) return payload.items.filter(Boolean);
+      if (Array.isArray(payload.regions)) return payload.regions.filter(Boolean);
+      if (Array.isArray(payload.data)) return payload.data.filter(Boolean);
+      if (Array.isArray(payload.countries)) return payload.countries.filter(Boolean);
+      return Object.entries(payload)
+        .map(([key, value]) => {
+          if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+          return { ...value, __fallbackKey: key };
+        })
+        .filter(Boolean);
+    };
+
+    const countries = normalizeCollection(countriesPayload).filter((country) => country && typeof country === 'object');
+    const regionalRecords = normalizeCollection(regionsPayload).filter((region) => region && typeof region === 'object');
 
     const governmentResults = await Promise.all(
-      countries.map((country) => fetchWarera('government.getByCountryId', { countryId: country._id }, token))
+      countries.map((country) => fetchWarera('government.getByCountryId', { countryId: country._id || country.id }, token))
     );
 
     const enrichedCountries = countries.map((country, index) => {
@@ -60,22 +77,57 @@ export default function CompanyAnalysis({ userId, token }) {
       };
     });
 
-    const combinedRegions = { ...regionsObj };
+    const countryById = enrichedCountries.reduce((acc, country) => {
+      const countryId = country?._id || country?.id;
+      if (countryId) acc[countryId] = country;
+      return acc;
+    }, {});
 
-    enrichedCountries.forEach((country) => {
-      if (Array.isArray(country.regions)) {
-        country.regions.forEach((regionId) => {
-          if (combinedRegions[regionId]) {
-            combinedRegions[regionId] = {
-              ...combinedRegions[regionId],
-              countryData: country,
-            };
-          }
-        });
+    const combinedRegions = regionalRecords.reduce((acc, region) => {
+      const regionId = region?._id || region?.id || region?.regionId || region?.__fallbackKey;
+      if (!regionId) return acc;
+      acc[regionId] = {
+        ...(acc[regionId] || {}),
+        ...region,
+        _id: regionId,
+      };
+      return acc;
+    }, {});
+
+    Object.values(combinedRegions).forEach((region) => {
+      const regionId = region?._id || region?.id;
+      const countryId = region?.country || region?.countryId || region?.countryData?._id || region?.parentCountryId;
+      if (regionId && countryId && countryById[countryId]) {
+        combinedRegions[regionId] = {
+          ...combinedRegions[regionId],
+          countryData: { ...(countryById[countryId] || {}), _id: countryId },
+        };
       }
     });
 
-    setCountriesDict(enrichedCountries.reduce((acc, country) => ({ ...acc, [country._id]: country }), {}));
+    enrichedCountries.forEach((country) => {
+      const countryId = country?._id || country?.id;
+      if (!countryId) return;
+      const regionIds = [
+        ...(Array.isArray(country.regions) ? country.regions : []),
+        ...(Array.isArray(country.regionIds) ? country.regionIds : []),
+      ];
+
+      regionIds.forEach((regionId) => {
+        const normalizedRegionId = typeof regionId === 'object' ? (regionId?._id || regionId?.id) : regionId;
+        if (!normalizedRegionId || !combinedRegions[normalizedRegionId]) return;
+        combinedRegions[normalizedRegionId] = {
+          ...(combinedRegions[normalizedRegionId] || {}),
+          countryData: { ...country, _id: countryId },
+        };
+      });
+    });
+
+    setCountriesDict(enrichedCountries.reduce((acc, country) => {
+      const countryId = country?._id || country?.id;
+      if (countryId) acc[countryId] = country;
+      return acc;
+    }, {}));
     setRegionsDict(combinedRegions);
   };
 
@@ -93,12 +145,26 @@ export default function CompanyAnalysis({ userId, token }) {
       setRegionsDict((prev) => {
         const next = { ...prev };
         if (regionRes?.success && regionRes.data) {
-          next[regionId] = { ...(next[regionId] || {}), ...regionRes.data };
+          const resolvedRegionId = regionRes.data?._id || regionRes.data?.id || regionId;
+          next[resolvedRegionId] = {
+            ...(next[resolvedRegionId] || {}),
+            ...(next[regionId] || {}),
+            ...regionRes.data,
+            _id: resolvedRegionId,
+          };
+          if (resolvedRegionId !== regionId) {
+            next[regionId] = {
+              ...(next[regionId] || {}),
+              ...regionRes.data,
+              _id: resolvedRegionId,
+            };
+          }
         }
         if (countryRes?.success && countryRes.data && countryId) {
-          const currentCountryData = next[regionId]?.countryData || {};
-          next[regionId] = {
-            ...(next[regionId] || {}),
+          const currentCountryData = next[regionId]?.countryData || next[regionId]?.country || {};
+          const resolvedRegionId = regionRes?.success && regionRes.data ? (regionRes.data?._id || regionRes.data?.id || regionId) : regionId;
+          next[resolvedRegionId] = {
+            ...(next[resolvedRegionId] || {}),
             countryData: {
               ...currentCountryData,
               ...countryRes.data,
@@ -296,8 +362,24 @@ function SummaryStat({ label, value, color = '#fff' }) {
 }
 
 function CompanyListItem({ comp, regionsDict, resolveGeoDetails, productionBonus, isExpanded, onToggle }) {
-  const aeLevel = comp?.activeUpgradeLevels?.automatedEngine ?? 0;
-  const ppPerDay = AE_PP_PER_DAY[aeLevel];
+  const aeLevel = Number(comp?.activeUpgradeLevels?.automatedEngine ?? comp?.automatedEngine ?? 0);
+  const ppPerDay = AE_PP_PER_DAY?.[aeLevel] ?? 0;
+
+  const pickNumeric = (source, keys) => {
+    for (const key of keys) {
+      const value = key.split('.').reduce((acc, part) => acc?.[part], source);
+      if (typeof value === 'number' && Number.isFinite(value)) {
+        return value;
+      }
+    }
+    return null;
+  };
+
+  const productionValue = pickNumeric(comp, ['production', 'dailyProduction', 'output', 'generatedProduction']);
+  const storageUsed = pickNumeric(comp, ['storageUsed', 'usedStorage', 'storage.used', 'inventoryUsed']);
+  const storageMax = pickNumeric(comp, ['storageMax', 'maxStorage', 'storage.max', 'capacity']);
+  const storageLevel = Number(comp?.activeUpgradeLevels?.storage ?? comp?.storageLevel ?? comp?.storage?.level ?? 0);
+  const productionBonusValue = pickNumeric(productionBonus, ['total', 'efficiency', 'productionBonus', 'bonus']);
 
   // Identifikasi regional lewat field asli API ("region")
   const regionId = comp?.region;
@@ -311,7 +393,7 @@ function CompanyListItem({ comp, regionsDict, resolveGeoDetails, productionBonus
   // Production bonus SEKARANG diambil langsung dari endpoint resmi server
   // company.getProductionBonus, bukan dihitung ulang manual di frontend.
   // Shape: { strategicBonus, depositBonus, ethicSpecializationBonus, ethicDepositBonus, total }
-  const totalEfficiency = productionBonus ? 100 + (productionBonus.total || 0) : null;
+  const totalEfficiency = productionBonusValue !== null ? 100 + productionBonusValue : null;
 
   const breakdownNotes = (() => {
     if (!productionBonus) {
@@ -348,11 +430,17 @@ function CompanyListItem({ comp, regionsDict, resolveGeoDetails, productionBonus
     return notes;
   })();
 
-  const productionDisplay = typeof comp?.production === 'number' ? `${comp.production.toFixed(0)} u/hari` : '—';
-  const storageUsed = typeof comp?.storageUsed === 'number' ? comp.storageUsed : 0;
-  const storageMax = typeof comp?.storageMax === 'number' ? comp.storageMax : null;
-  const storageCapacityText = storageMax !== null ? `${storageUsed} / ${storageMax}` : `${storageUsed} / —`;
-  const storagePercent = storageMax !== null && storageMax > 0 ? Math.min((storageUsed / storageMax) * 100, 100) : 0;
+  const productionDisplay = productionValue !== null ? `${productionValue.toFixed(2)} u/hari` : '—';
+  const effectiveStorageUsed = storageUsed ?? 0;
+  const effectiveStorageMax = storageMax ?? null;
+  const storageCapacityText = effectiveStorageMax !== null
+    ? `${effectiveStorageUsed} / ${effectiveStorageMax}`
+    : storageLevel > 0
+      ? `Lv ${storageLevel}`
+      : `${effectiveStorageUsed} / —`;
+  const storagePercent = effectiveStorageMax !== null && effectiveStorageMax > 0
+    ? Math.min((effectiveStorageUsed / effectiveStorageMax) * 100, 100)
+    : 0;
 
   useEffect(() => {
     if (!resolveGeoDetails || !comp?.region) return;
@@ -366,12 +454,13 @@ function CompanyListItem({ comp, regionsDict, resolveGeoDetails, productionBonus
   }, [comp?.region, countryData?._id, countryData?.id, regionData?.name, regionData?.code, regionData?.displayName, countryData?.name, countryData?.code, countryData?.taxes?.market, resolveGeoDetails]);
 
   const locationText = (() => {
-    const regionCode = regionData?.code || regionData?.name || comp?.region || null;
-    const countryName = countryData?.name || null;
-    const countryCode = countryData?.code?.toUpperCase?.() || null;
-    const depositType = regionData?.deposit?.type || null;
-    const depositBonus = regionData?.deposit?.bonusPercent;
-    const taxRate = countryData?.taxes?.market;
+    const regionLabel = regionData?.displayName || regionData?.name || regionData?.code || regionData?.regionName || null;
+    const regionCode = regionData?.code || regionLabel || comp?.region || null;
+    const countryName = countryData?.name || regionData?.countryData?.name || regionData?.countryName || null;
+    const countryCode = countryData?.code?.toUpperCase?.() || regionData?.countryData?.code?.toUpperCase?.() || null;
+    const depositType = regionData?.deposit?.type || regionData?.depositType || null;
+    const depositBonus = regionData?.deposit?.bonusPercent ?? regionData?.bonusPercent ?? null;
+    const taxRate = countryData?.taxes?.market ?? countryData?.marketTax ?? null;
 
     const parts = [];
     if (regionCode) parts.push(regionCode);
@@ -448,7 +537,8 @@ function CompanyListItem({ comp, regionsDict, resolveGeoDetails, productionBonus
             </div>
             <DetailRow label="Pekerja Aktif" value={comp?.workerCount !== undefined ? `${comp.workerCount} Orang` : '—'} />
             <DetailRow label="Engine Level" value={`Lv ${aeLevel}${ppPerDay !== undefined ? ` (${ppPerDay} PP/hari)` : ''}`} />
-            <DetailRow label="Produksi Harian" value={typeof comp?.production === 'number' ? `${comp.production.toFixed(2)} ${comp?.itemCode || ''}/hari` : '—'} />
+            <DetailRow label="Produksi Harian" value={productionValue !== null ? `${productionValue.toFixed(2)} ${comp?.itemCode || ''}/hari` : '—'} />
+            <DetailRow label="Storage" value={storageLevel > 0 ? `Lv ${storageLevel}` : (effectiveStorageMax !== null ? `${effectiveStorageUsed} / ${effectiveStorageMax}` : '—')} />
 
             {/* PANEL EDUKASI STRATEGI GEOPOLITIK */}
             <div style={{ marginTop: '12px', padding: '10px', background: 'rgba(0, 0, 0, 0.4)', borderRadius: '8px', border: '1px solid rgba(0, 212, 255, 0.15)' }}>
@@ -468,7 +558,7 @@ function CompanyListItem({ comp, regionsDict, resolveGeoDetails, productionBonus
             <div style={{ marginTop: '12px', padding: '10px', background: 'rgba(0,0,0,0.3)', borderRadius: '6px', border: '1px solid #333' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11px', color: '#aaa', marginBottom: '6px' }}>
                 <span>Kapasitas Storage</span>
-                <span style={{ color: storageMax !== null && storageUsed >= storageMax ? '#e74c3c' : '#4caf50', fontWeight: 'bold' }}>
+                <span style={{ color: effectiveStorageMax !== null && effectiveStorageUsed >= effectiveStorageMax ? '#e74c3c' : '#4caf50', fontWeight: 'bold' }}>
                   {storageCapacityText}
                 </span>
               </div>
@@ -476,7 +566,7 @@ function CompanyListItem({ comp, regionsDict, resolveGeoDetails, productionBonus
                 <div style={{
                   width: `${storagePercent}%`,
                   height: '100%',
-                  background: storageMax !== null && storageUsed >= storageMax ? '#e74c3c' : '#4caf50',
+                  background: effectiveStorageMax !== null && effectiveStorageUsed >= effectiveStorageMax ? '#e74c3c' : '#4caf50',
                   transition: 'width 0.4s ease'
                 }} />
               </div>

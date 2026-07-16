@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { normalizeWareraPayload, extractCompanyReferences, normalizeCompanyDetail } from './companyData';
 
 const api = axios.create({
   baseURL: 'http://localhost:5000/api/players', // Sesuaikan dengan endpoint backend Anda
@@ -13,7 +14,7 @@ export const fetchWarera = async (procedure, input, explicitToken = null) => {
     }
 
     const response = await api.post(`/${procedure}`, { input }, { headers });
-    return { success: true, data: response.data?.result?.data };
+    return { success: true, data: normalizeWareraPayload(response.data) };
   } catch (error) {
     return { success: false, error: error.message, data: null };
   }
@@ -34,10 +35,21 @@ export const searchPlayerCompanies = async (username) => {
 
     let detailedCompanies = [];
     if (companiesListRes.success) {
-      const details = await Promise.all(
-        (companiesListRes.data?.items || []).map(id => fetchWarera('company.getById', { companyId: id }))
-      );
-      detailedCompanies = details.map(res => res?.data).filter(Boolean);
+      const companyReferences = extractCompanyReferences(companiesListRes.data ?? companiesListRes);
+      if (companyReferences.length > 0) {
+        const details = await Promise.all(
+          companyReferences.map((reference) => {
+            if (typeof reference === 'string' || typeof reference === 'number') {
+              return fetchWarera('company.getById', { companyId: reference });
+            }
+            if (reference && typeof reference === 'object') {
+              return Promise.resolve({ success: true, data: normalizeCompanyDetail(reference) });
+            }
+            return Promise.resolve({ success: true, data: null });
+          })
+        );
+        detailedCompanies = details.map((res) => normalizeCompanyDetail(res?.data ?? res)).filter(Boolean);
+      }
     }
     return { success: true, playerData: profileRes.data, companies: detailedCompanies };
   } catch (err) {
@@ -58,10 +70,21 @@ export const getCompaniesByUserId = async (userId, token = null) => {
 
     let detailedCompanies = [];
     if (companiesListRes.success) {
-      const details = await Promise.all(
-        (companiesListRes.data?.items || []).map(id => fetchWarera('company.getById', { companyId: id }, token))
-      );
-      detailedCompanies = details.map(res => res?.data).filter(Boolean);
+      const companyReferences = extractCompanyReferences(companiesListRes.data ?? companiesListRes);
+      if (companyReferences.length > 0) {
+        const details = await Promise.all(
+          companyReferences.map((reference) => {
+            if (typeof reference === 'string' || typeof reference === 'number') {
+              return fetchWarera('company.getById', { companyId: reference }, token);
+            }
+            if (reference && typeof reference === 'object') {
+              return Promise.resolve({ success: true, data: normalizeCompanyDetail(reference) });
+            }
+            return Promise.resolve({ success: true, data: null });
+          })
+        );
+        detailedCompanies = details.map((res) => normalizeCompanyDetail(res?.data ?? res)).filter(Boolean);
+      }
     }
     return { success: true, playerData: profileRes.data, companies: detailedCompanies };
   } catch (err) {
