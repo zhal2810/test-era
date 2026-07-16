@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
-import { fetchWarera, getItemOfferById } from '../api/apiClient';
+import { fetchWarera, getMarketStats } from '../api/apiClient';
 
 function formatItemName(key) {
   return key
@@ -271,262 +271,261 @@ function normalizePrices(data, previousPrices = {}, statsMap = {}) {
 }
 
 export default function MarketIntel({ token }) {
-    const [prices, setPrices] = useState([]);
-    const [loading, setLoading] = useState(true);
-    const [sortBy, setSortBy] = useState('price');
-    const [sortDirection, setSortDirection] = useState('desc');
-    const [changeRange, setChangeRange] = useState('all');
+  const [prices, setPrices] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [sortBy, setSortBy] = useState('price');
+  const [sortDirection, setSortDirection] = useState('desc');
+  const [changeRange, setChangeRange] = useState('24h');
 
-    useEffect(() => {
-        let cancelled = false;
-        setLoading(true);
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
 
-        const loadMarketData = async () => {
+    const loadMarketData = async () => {
+      try {
+        const previousSnapshot = (() => {
+          try {
+            return JSON.parse(localStorage.getItem('warera_market_previous') || '{}');
+          } catch {
+            return {};
+          }
+        })();
+
+        const [wareraRes, statsRes] = await Promise.all([
+          fetchWarera('itemTrading.getPrices', {}),
+          getMarketStats().catch(() => null)
+        ]);
+
+
+        if (!cancelled) {
+          const statsMap = {};
+          if (statsRes?.success && Array.isArray(statsRes.data)) {
+            statsRes.data.forEach(item => {
+              statsMap[item.itemCode] = item;
+            });
+          }
+
+          const normalized = (wareraRes.success && wareraRes.data)
+            ? normalizePrices(wareraRes.data, previousSnapshot, statsMap)
+            : [];
+
+          const enriched = await Promise.all(normalized.map(async (entry) => {
             try {
-                const previousSnapshot = (() => {
-                    try {
-                        return JSON.parse(localStorage.getItem('warera_market_previous') || '{}');
-                    } catch {
-                        return {};
-                    }
-                })();
+              const orderRes = await fetchWarera('tradingOrder.getTopOrders', { itemCode: entry.item, limit: 3 }, token);
+              const payload = orderRes?.success ? orderRes.data : null;
 
-                const wareraRes = await fetchWarera('itemTrading.getPrices', {});
-                
-
-                if (!cancelled) {
-                    const normalized = (wareraRes.success && wareraRes.data)
-                        ? normalizePrices(wareraRes.data, previousSnapshot, {})
-                        : [];
-
-                    const enriched = await Promise.all(normalized.map(async (entry) => {
-                        try {
-                            const [orderRes, offerRes] = await Promise.allSettled([
-                                fetchWarera('tradingOrder.getTopOrders', { itemCode: entry.item, limit: 3 }, token),
-                                getItemOfferById(entry.item, token),
-                            ]);
-
-                            const orderResult = orderRes.status === 'fulfilled' ? orderRes.value : null;
-                            const offerResult = offerRes.status === 'fulfilled' ? offerRes.value : null;
-
-                            const payload = orderResult?.success ? orderResult.data : null;
-                            const offerSummary = summarizeOfferDetail(offerResult?.data ?? null);
-                            const offerText = offerSummary
-                                ? `${offerSummary.side ? `${offerSummary.side} ` : ''}${offerSummary.price !== null ? `@ ${offerSummary.price.toFixed(2)}` : ''}${offerSummary.quantity !== null ? ` • ${formatVolume(offerSummary.quantity)}` : ''}`.trim()
-                                : null;
-
-                            return {
-                                ...entry,
-                                topBuy: extractTopOrder(payload, 'buy'),
-                                topSell: extractTopOrder(payload, 'sell'),
-                                offerText,
-                            };
-                        } catch {
-                            return entry;
-                        }
-                    }));
-
-                    setPrices(enriched);
-
-                    try {
-                        const nextSnapshot = Object.fromEntries(
-                            enriched.map((entry) => [entry.item, Number(entry.price)])
-                        );
-                        localStorage.setItem('warera_market_previous', JSON.stringify(nextSnapshot));
-                    } catch {
-                        // ignore storage errors
-                    }
-                }
+              return {
+                ...entry,
+                topBuy: extractTopOrder(payload, 'buy'),
+                topSell: extractTopOrder(payload, 'sell'),
+                offerText: null,
+              };
             } catch {
-                if (!cancelled) {
-                    setPrices([]);
-                }
-            } finally {
-                if (!cancelled) {
-                    setLoading(false);
-                }
+              return entry;
             }
-        };
+          }));
 
-        loadMarketData();
+          setPrices(enriched);
 
-        return () => {
-            cancelled = true;
-        };
-    }, [token]);
-
-    const priceEntries = Array.isArray(prices) ? [...prices] : [];
-
-    const getDisplayChangeValue = (entry) => {
-        const value = entry?.changeByRange?.[changeRange];
-        return value === null || value === undefined ? entry?.changeValue ?? 0 : Number(value);
+          try {
+            const nextSnapshot = Object.fromEntries(
+              enriched.map((entry) => [entry.item, Number(entry.price)])
+            );
+            localStorage.setItem('warera_market_previous', JSON.stringify(nextSnapshot));
+          } catch {
+            // ignore storage errors
+          }
+        }
+      } catch {
+        if (!cancelled) {
+          setPrices([]);
+        }
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
+      }
     };
 
-    const sortedEntries = [...priceEntries].sort((a, b) => {
-        let comparison = 0;
+    loadMarketData();
 
-        switch (sortBy) {
-            case 'volume':
-                comparison = (b.volumeValue || 0) - (a.volumeValue || 0);
-                break;
-            case 'price':
-                comparison = Number(b.price) - Number(a.price);
-                break;
-            case 'change':
-                comparison = (getDisplayChangeValue(b) || 0) - (getDisplayChangeValue(a) || 0);
-                break;
-            case 'name':
-                comparison = String(a.name).localeCompare(String(b.name));
-                break;
-            default:
-                comparison = 0;
-        }
+    return () => {
+      cancelled = true;
+    };
+  }, [token]);
 
-        return sortDirection === 'desc' ? comparison : -comparison;
-    });
+  const priceEntries = Array.isArray(prices) ? [...prices] : [];
 
-    return (
-        <div style={{
-            background: 'rgba(20, 20, 25, 0.9)',
-            border: '1px solid #3498db',
-            padding: '20px',
-            borderRadius: '12px',
-            boxShadow: '0 0 20px rgba(52, 152, 219, 0.2)'
-        }}>
-            <h3 style={{ color: '#3498db', marginBottom: '12px', display: 'flex', alignItems: 'center', gap: '10px' }}>
-                Market 
-            </h3>
-            <p style={{ color: '#888', fontSize: '12px', marginBottom: '16px' }}>
-                Harga Pasar Hari ini untuk Referensi Cepat.
-            </p>
+  const getDisplayChangeValue = (entry) => {
+    const value = entry?.changeByRange?.[changeRange];
+    return value === null || value === undefined ? entry?.changeValue ?? 0 : Number(value);
+  };
 
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px', flexWrap: 'wrap', gap: '8px' }}>
-                <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
-                    <div style={{ fontSize: '12px', color: '#8ab4f8' }}>Change:</div>
-                    <select
-                        value={changeRange}
-                        onChange={(e) => setChangeRange(e.target.value)}
-                        style={{
-                            background: 'rgba(20,20,25,0.9)',
-                            color: '#fff',
-                            border: '1px solid #3498db',
-                            borderRadius: '6px',
-                            padding: '6px 10px',
-                            fontSize: '12px',
-                        }}
-                    >
-                        <option value="24h">24H</option>
-                        <option value="7d">7D</option>
-                        <option value="30d">30D</option>
-                        <option value="90d">90D</option>
-                        <option value="all">All</option>
-                    </select>
-                </div>
-                <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-                    <div style={{ fontSize: '12px', color: '#8ab4f8' }}>Sort by:</div>
-                    <select
-                        value={sortBy}
-                        onChange={(e) => setSortBy(e.target.value)}
-                        style={{
-                            background: 'rgba(20,20,25,0.9)',
-                            color: '#fff',
-                            border: '1px solid #3498db',
-                            borderRadius: '6px',
-                            padding: '6px 10px',
-                            fontSize: '12px',
-                        }}
-                    >
-                        <option value="volume">Volume</option>
-                        <option value="price">Price</option>
-                        <option value="change">Change</option>
-                        <option value="name">Name</option>
-                    </select>
-                    <select
-                        value={sortDirection}
-                        onChange={(e) => setSortDirection(e.target.value)}
-                        style={{
-                            background: 'rgba(20,20,25,0.9)',
-                            color: '#fff',
-                            border: '1px solid #3498db',
-                            borderRadius: '6px',
-                            padding: '6px 10px',
-                            fontSize: '12px',
-                        }}
-                    >
-                        <option value="desc">↓ Desc</option>
-                        <option value="asc">↑ Asc</option>
-                    </select>
-                </div>
-            </div>
+  const sortedEntries = [...priceEntries].sort((a, b) => {
+    let comparison = 0;
 
-            {loading && priceEntries.length === 0 ? (
-                <div style={{ color: '#888', fontSize: '13px' }}>Loading market data from endpoint...</div>
-            ) : priceEntries.length > 0 ? (
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
-                    {sortedEntries.map((entry) => {
-                        const displayChangeValue = getDisplayChangeValue(entry);
-                        const displayChange = formatChange(displayChangeValue);
+    switch (sortBy) {
+      case 'volume':
+        comparison = (b.volumeValue || 0) - (a.volumeValue || 0);
+        break;
+      case 'price':
+        comparison = Number(b.price) - Number(a.price);
+        break;
+      case 'change':
+        comparison = (getDisplayChangeValue(b) || 0) - (getDisplayChangeValue(a) || 0);
+        break;
+      case 'name':
+        comparison = String(a.name).localeCompare(String(b.name));
+        break;
+      default:
+        comparison = 0;
+    }
 
-                        return (
-                        <div key={entry.item} style={{
-                            background: 'rgba(52, 152, 219, 0.1)',
-                            padding: '10px',
-                            borderRadius: '6px',
-                            border: '1px solid rgba(52, 152, 219, 0.3)',
-                            display: 'flex',
-                            alignItems: 'center'
-                        }}>
-                            <img
-                                src={`/images/items/${entry.item}.png`}
-                                alt={entry.item}
-                                width={24}
-                                height={24}
-                                style={{ objectFit: 'contain', marginRight: '10px' }}
-                                onError={(e) => { e.target.style.display = 'none'; }}
-                            />
+    return sortDirection === 'desc' ? comparison : -comparison;
+  });
 
-                            <div style={{ flex: 1 }}>
-                                <div style={{ fontSize: '11px', color: '#aaa', textTransform: 'uppercase', marginBottom: '4px' }}>
-                                    {entry.name}
-                                </div>
-                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
-                                    <div style={{ fontSize: '14px', fontWeight: 'bold', color: '#fff' }}>
-                                        {Number(entry.price).toFixed(2)}
-                                    </div>
-                                    <div
-                                        style={{
-                                            fontSize: '11px',
-                                            fontWeight: '700',
-                                            padding: '3px 7px',
-                                            borderRadius: '999px',
-                                            ...getChangeStyle(displayChangeValue),
-                                        }}
-                                    >
-                                        {displayChangeValue > 0 ? '▲' : displayChangeValue < 0 ? '▼' : '•'} {displayChange}
-                                    </div>
-                                </div>
-                                <div style={{ fontSize: '11px', color: '#8ab4f8', marginBottom: '3px' }}>
-                                    Volume: {formatVolume(entry.volume)}
-                                </div>
-                                <div style={{ fontSize: '10px', color: '#7dd3fc', lineHeight: 1.4 }}>
-                                    Buy: {entry.topBuy || '—'}
-                                </div>
-                                <div style={{ fontSize: '10px', color: '#fda4af', lineHeight: 1.4 }}>
-                                    Sell: {entry.topSell || '—'}
-                                </div>
-                                {entry.offerText ? (
-                                    <div style={{ fontSize: '10px', color: '#fef3c7', lineHeight: 1.4, marginTop: '2px' }}>
-                                        Offer: {entry.offerText}
-                                    </div>
-                                ) : null}
-                            </div>
-                        </div>
-                        );
-                    })}
-                </div>
-            ) : (
-                <div style={{ color: '#888', fontSize: '13px' }}>Tidak ada data pasar yang diterima dari endpoint.</div>
-            )}
+  return (
+    <div style={{
+      background: 'rgba(20, 20, 25, 0.9)',
+      border: '1px solid #3498db',
+      padding: '20px',
+      borderRadius: '12px',
+      boxShadow: '0 0 20px rgba(52, 152, 219, 0.2)'
+    }}>
+      <h3 style={{ color: '#3498db', marginBottom: '12px', display: 'flex', alignItems: 'center', gap: '10px' }}>
+        Market
+      </h3>
+      <p style={{ color: '#888', fontSize: '12px', marginBottom: '16px' }}>
+        Harga Pasar Hari ini untuk Referensi Cepat.
+      </p>
+
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px', flexWrap: 'wrap', gap: '8px' }}>
+        <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
+          <div style={{ fontSize: '12px', color: '#8ab4f8' }}>Change:</div>
+          <select
+            value={changeRange}
+            onChange={(e) => setChangeRange(e.target.value)}
+            style={{
+              background: 'rgba(20,20,25,0.9)',
+              color: '#fff',
+              border: '1px solid #3498db',
+              borderRadius: '6px',
+              padding: '6px 10px',
+              fontSize: '12px',
+            }}
+          >
+            <option value="24h">24H</option>
+            <option value="7d">7D</option>
+            <option value="30d">30D</option>
+            <option value="90d">90D</option>
+            <option value="all">All</option>
+          </select>
         </div>
-    );
+        <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+          <div style={{ fontSize: '12px', color: '#8ab4f8' }}>Sort by:</div>
+          <select
+            value={sortBy}
+            onChange={(e) => setSortBy(e.target.value)}
+            style={{
+              background: 'rgba(20,20,25,0.9)',
+              color: '#fff',
+              border: '1px solid #3498db',
+              borderRadius: '6px',
+              padding: '6px 10px',
+              fontSize: '12px',
+            }}
+          >
+            <option value="volume">Volume</option>
+            <option value="price">Price</option>
+            <option value="change">Change</option>
+            <option value="name">Name</option>
+          </select>
+          <select
+            value={sortDirection}
+            onChange={(e) => setSortDirection(e.target.value)}
+            style={{
+              background: 'rgba(20,20,25,0.9)',
+              color: '#fff',
+              border: '1px solid #3498db',
+              borderRadius: '6px',
+              padding: '6px 10px',
+              fontSize: '12px',
+            }}
+          >
+            <option value="desc">↓ Desc</option>
+            <option value="asc">↑ Asc</option>
+          </select>
+        </div>
+      </div>
+
+      {loading && priceEntries.length === 0 ? (
+        <div style={{ color: '#888', fontSize: '13px' }}>Loading market data from endpoint...</div>
+      ) : priceEntries.length > 0 ? (
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
+          {sortedEntries.map((entry) => {
+            const displayChangeValue = getDisplayChangeValue(entry);
+            const displayChange = formatChange(displayChangeValue);
+
+            return (
+              <div key={entry.item} style={{
+                background: 'rgba(52, 152, 219, 0.1)',
+                padding: '10px',
+                borderRadius: '6px',
+                border: '1px solid rgba(52, 152, 219, 0.3)',
+                display: 'flex',
+                alignItems: 'center'
+              }}>
+                <img
+                  src={`/images/items/${entry.item}.png`}
+                  alt={entry.item}
+                  width={24}
+                  height={24}
+                  style={{ objectFit: 'contain', marginRight: '10px' }}
+                  onError={(e) => { e.target.style.display = 'none'; }}
+                />
+
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: '11px', color: '#aaa', textTransform: 'uppercase', marginBottom: '4px' }}>
+                    {entry.name}
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
+                    <div style={{ fontSize: '14px', fontWeight: 'bold', color: '#fff' }}>
+                      {Number(entry.price).toFixed(2)}
+                    </div>
+                    <div
+                      style={{
+                        fontSize: '11px',
+                        fontWeight: '700',
+                        padding: '3px 7px',
+                        borderRadius: '999px',
+                        ...getChangeStyle(displayChangeValue),
+                      }}
+                    >
+                      {displayChangeValue > 0 ? '▲' : displayChangeValue < 0 ? '▼' : '•'} {displayChange}
+                    </div>
+                  </div>
+                  <div style={{ fontSize: '11px', color: '#8ab4f8', marginBottom: '3px' }}>
+                    Volume: {formatVolume(entry.volume)}
+                  </div>
+                  <div style={{ fontSize: '10px', color: '#7dd3fc', lineHeight: 1.4 }}>
+                    Buy: {entry.topBuy || '—'}
+                  </div>
+                  <div style={{ fontSize: '10px', color: '#fda4af', lineHeight: 1.4 }}>
+                    Sell: {entry.topSell || '—'}
+                  </div>
+                  {entry.offerText ? (
+                    <div style={{ fontSize: '10px', color: '#fef3c7', lineHeight: 1.4, marginTop: '2px' }}>
+                      Offer: {entry.offerText}
+                    </div>
+                  ) : null}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      ) : (
+        <div style={{ color: '#888', fontSize: '13px' }}>Tidak ada data pasar yang diterima dari endpoint.</div>
+      )}
+    </div>
+  );
 }

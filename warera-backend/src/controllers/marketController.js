@@ -1,4 +1,6 @@
 const axios = require('axios');
+const fs = require('fs');
+const path = require('path');
 
 const WARERA_BASE_URL = 'https://api2.warera.io/trpc';
 
@@ -34,4 +36,28 @@ const getMarketItems = async (req, res) => {
   }
 };
 
-module.exports = { getMarketItems };
+/**
+ * GET /api/market/stats
+ * Membaca data statistik harga historis dari file lokal temp_warera_stats.json.
+ */
+const getMarketStats = (req, res) => {
+  try {
+    const filePath = path.join(__dirname, '../../../temp_warera_stats.json');
+    if (fs.existsSync(filePath)) {
+      const rawData = fs.readFileSync(filePath, 'utf-8');
+      const stats = JSON.parse(rawData);
+      res.json({ success: true, data: stats });
+    } else {
+      res.status(404).json({ success: false, error: 'File temp_warera_stats.json tidak ditemukan' });
+    }
+  } catch (error) {
+    console.error('[Market Proxy Error] getMarketStats:', error.message);
+    res.status(500).json({
+      success: false,
+      error: 'Gagal membaca statistik pasar',
+      detail: error.message,
+    });
+  }
+};
+
+module.exports = { getMarketItems, getMarketStats };

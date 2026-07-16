@@ -116,3 +116,13 @@ export const getProductionBonus = async (companyId, token = null) => {
     return { success: false, error: err.message, data: null };
   }
 };
+
+// Mengambil data statistik historis pasar dari server proxy lokal
+export const getMarketStats = async () => {
+  try {
+    const response = await axios.get('http://localhost:5000/api/market/stats');
+    return response.data;
+  } catch (error) {
+    return { success: false, error: error.message, data: null };
+  }
+};

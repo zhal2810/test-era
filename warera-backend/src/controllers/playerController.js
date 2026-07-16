@@ -20,15 +20,25 @@ const WARERA_BASE_URL = 'https://api2.warera.io/trpc';
 const handleWareraRequest = async (req, res) => {
   const { procedure } = req.params;
   const rawInput = req.method === 'GET' ? req.query : (req.body?.input ?? req.body ?? {});
-  const input = typeof rawInput === 'string' ? JSON.parse(rawInput) : (rawInput ?? {});
+  const input = { ...(typeof rawInput === 'string' ? JSON.parse(rawInput) : (rawInput ?? {})) };
+
+  // Konversi parameter query bertipe angka (seperti limit, perPage) dari string ke number
+  for (const key in input) {
+    if (typeof input[key] === 'string' && input[key].trim() !== '') {
+      const num = Number(input[key]);
+      if (!Number.isNaN(num)) {
+        input[key] = num;
+      }
+    }
+  }
 
   const apiKey = req.headers['x-api-key'];
 
   try {
-    const response = await axios.get(
+    const response = await axios.post(
       `${WARERA_BASE_URL}/${procedure}`,
+      input,
       {
-        params: input,
         headers: {
           'Content-Type': 'application/json',
           ...(apiKey ? { 'X-API-Key': apiKey } : {}),
