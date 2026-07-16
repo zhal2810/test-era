@@ -27,7 +27,7 @@ export default function CompanyList({ companies, regionsDict }) {
         const regionId = comp?.region;
         const regionData = regionsDict ? regionsDict[regionId] : null;
         const countryData = regionData?.countryData; // Data negara yang ditempel di region
-        const locationText = regionData ? `${regionData.code}` : 'Unknown';
+        const locationText = regionData?.name || regionData?.code || regionData?.displayName || 'Unknown';
 
         // Hitung efisiensi tunggal menggunakan analisis geopolitik terpadu
         const { totalEfficiency, breakdownNotes } = calculateCompanyProduction(comp, regionData, countryData);

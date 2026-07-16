@@ -2,22 +2,17 @@ import React, { useState, useEffect, useRef } from 'react';
 import { getCompaniesByUserId, getProductionBonus, fetchWarera } from '../api/apiClient';
 import { AE_PP_PER_DAY } from './production';
 
-
-
 export default function CompanyAnalysis({ userId, token }) {
   const [isLoading, setIsLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
   const [data, setData] = useState(null);
 
-  // STATE UNTUK KAMUS
   const [regionsDict, setRegionsDict] = useState({});
-  const [countriesDict, setCountriesDict] = useState({});
   const [productionBonusDict, setProductionBonusDict] = useState({});
   const [expandedId, setExpandedId] = useState(null);
-  const pendingGeoLookupsRef = useRef(new Set());
+  const [marketPrices, setMarketPrices] = useState({});
 
   const loadProductionBonuses = async (companies = []) => {
-    if (!token) return;
     const ids = companies.map((c) => c?._id).filter(Boolean);
     if (ids.length === 0) return;
 
@@ -36,168 +31,32 @@ export default function CompanyAnalysis({ userId, token }) {
     });
   };
 
-  const loadGeographyContext = async (companies = []) => {
-    if (!token) return;
-
-    const [countriesRes, regionsRes] = await Promise.all([
-      fetchWarera('country.getAllCountries', {}, token),
-      fetchWarera('region.getRegionsObject', {}, token),
-    ]);
-
-    const countriesPayload = countriesRes?.data ?? countriesRes?.result?.data ?? countriesRes;
+  const loadGeographyContext = async () => {
+    const regionsRes = await fetchWarera('region.getRegionsObject', {}, token);
     const regionsPayload = regionsRes?.data ?? regionsRes?.result?.data ?? regionsRes;
 
-    const normalizeCollection = (payload) => {
+    const normalizeRegions = (payload) => {
       if (Array.isArray(payload)) return payload.filter(Boolean);
       if (!payload || typeof payload !== 'object') return [];
-      if (Array.isArray(payload.items)) return payload.items.filter(Boolean);
       if (Array.isArray(payload.regions)) return payload.regions.filter(Boolean);
-      if (Array.isArray(payload.data)) return payload.data.filter(Boolean);
-      if (Array.isArray(payload.countries)) return payload.countries.filter(Boolean);
       return Object.entries(payload)
-        .map(([key, value]) => {
-          if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-          return { ...value, __fallbackKey: key };
-        })
+        .map(([key, value]) => (!value || typeof value !== 'object' || Array.isArray(value)) ? null : { ...value, __fallbackKey: key })
         .filter(Boolean);
     };
 
-    const countries = normalizeCollection(countriesPayload).filter((country) => country && typeof country === 'object');
-    const regionalRecords = normalizeCollection(regionsPayload).filter((region) => region && typeof region === 'object');
-
-    const governmentResults = await Promise.all(
-      countries.map((country) => fetchWarera('government.getByCountryId', { countryId: country._id || country.id }, token))
-    );
-
-    const enrichedCountries = countries.map((country, index) => {
-      const govRes = governmentResults[index];
-      return {
-        ...country,
-        ...(govRes?.success ? { government: govRes.data } : {}),
-      };
-    });
-
-    const countryById = enrichedCountries.reduce((acc, country) => {
-      const countryId = country?._id || country?.id;
-      if (countryId) acc[countryId] = country;
-      return acc;
-    }, {});
-
+    const regionalRecords = normalizeRegions(regionsPayload);
     const combinedRegions = regionalRecords.reduce((acc, region) => {
       const regionId = region?._id || region?.id || region?.regionId || region?.__fallbackKey;
-      if (!regionId) return acc;
-      acc[regionId] = {
-        ...(acc[regionId] || {}),
-        ...region,
-        _id: regionId,
-      };
+      if (regionId) acc[regionId] = { ...region, _id: regionId };
       return acc;
     }, {});
 
-    Object.values(combinedRegions).forEach((region) => {
-      const regionId = region?._id || region?.id;
-      const countryId = region?.country || region?.countryId || region?.countryData?._id || region?.parentCountryId;
-      if (regionId && countryId && countryById[countryId]) {
-        combinedRegions[regionId] = {
-          ...combinedRegions[regionId],
-          countryData: { ...(countryById[countryId] || {}), _id: countryId },
-        };
-      }
-    });
-
-    enrichedCountries.forEach((country) => {
-      const countryId = country?._id || country?.id;
-      if (!countryId) return;
-      const regionIds = [
-        ...(Array.isArray(country.regions) ? country.regions : []),
-        ...(Array.isArray(country.regionIds) ? country.regionIds : []),
-      ];
-
-      regionIds.forEach((regionId) => {
-        const normalizedRegionId = typeof regionId === 'object' ? (regionId?._id || regionId?.id) : regionId;
-        if (!normalizedRegionId || !combinedRegions[normalizedRegionId]) return;
-        combinedRegions[normalizedRegionId] = {
-          ...(combinedRegions[normalizedRegionId] || {}),
-          countryData: { ...country, _id: countryId },
-        };
-      });
-    });
-
-    setCountriesDict(enrichedCountries.reduce((acc, country) => {
-      const countryId = country?._id || country?.id;
-      if (countryId) acc[countryId] = country;
-      return acc;
-    }, {}));
     setRegionsDict(combinedRegions);
   };
 
-  const resolveGeoDetails = async (regionId, countryId) => {
-    if (!token || !regionId || pendingGeoLookupsRef.current.has(regionId)) return;
-
-    pendingGeoLookupsRef.current.add(regionId);
-
-    try {
-      const [regionRes, countryRes] = await Promise.all([
-        fetchWarera('region.getById', { regionId }, token),
-        countryId ? fetchWarera('country.getCountryById', { countryId }, token) : Promise.resolve({ success: false }),
-      ]);
-
-      setRegionsDict((prev) => {
-        const next = { ...prev };
-        if (regionRes?.success && regionRes.data) {
-          const resolvedRegionId = regionRes.data?._id || regionRes.data?.id || regionId;
-          next[resolvedRegionId] = {
-            ...(next[resolvedRegionId] || {}),
-            ...(next[regionId] || {}),
-            ...regionRes.data,
-            _id: resolvedRegionId,
-          };
-          if (resolvedRegionId !== regionId) {
-            next[regionId] = {
-              ...(next[regionId] || {}),
-              ...regionRes.data,
-              _id: resolvedRegionId,
-            };
-          }
-        }
-        if (countryRes?.success && countryRes.data && countryId) {
-          const currentCountryData = next[regionId]?.countryData || next[regionId]?.country || {};
-          const resolvedRegionId = regionRes?.success && regionRes.data ? (regionRes.data?._id || regionRes.data?.id || regionId) : regionId;
-          next[resolvedRegionId] = {
-            ...(next[resolvedRegionId] || {}),
-            countryData: {
-              ...currentCountryData,
-              ...countryRes.data,
-              _id: countryId,
-            },
-          };
-        }
-        return next;
-      });
-
-      if (countryRes?.success && countryId) {
-        setCountriesDict((prev) => ({
-          ...prev,
-          [countryId]: {
-            ...(prev[countryId] || {}),
-            ...countryRes.data,
-            _id: countryId,
-          },
-        }));
-      }
-    } catch {
-      // ignore lookup errors to keep the UI responsive
-    } finally {
-      pendingGeoLookupsRef.current.delete(regionId);
-    }
-  };
-
   useEffect(() => {
-    if (token) {
-      loadGeographyContext();
-    }
-  }, [token]);
-
+    loadGeographyContext();
+  }, []);
 
   useEffect(() => {
     if (!userId) {
@@ -213,10 +72,9 @@ export default function CompanyAnalysis({ userId, token }) {
     const result = await getCompaniesByUserId(userId, token);
     if (result.success) {
       setData(result);
-      await Promise.all([
-        loadGeographyContext(result.companies || []),
-        loadProductionBonuses(result.companies || []),
-      ]);
+      const priceRes = await fetchWarera('itemTrading.getPrices', {}, token);
+      if (priceRes.success && priceRes.data) setMarketPrices(priceRes.data);
+      await loadProductionBonuses(result.companies || []);
     } else {
       setErrorMsg(result.error);
     }
@@ -224,175 +82,74 @@ export default function CompanyAnalysis({ userId, token }) {
   };
 
   const companies = data?.companies || [];
-  const totalProduction = companies.reduce((sum, c) => {
-    const val = typeof c?.production === 'number' ? c.production : 0;
-    return sum + val;
-  }, 0);
-
-  const totalEstimatedValue = companies.reduce((sum, comp) => {
-    const val = typeof comp?.estimatedValue === 'number' ? comp.estimatedValue : 0;
-    return sum + val;
-  }, 0);
-
-  const totalProductionValue = companies.reduce((sum, comp) => {
-    const production = typeof comp?.production === 'number' ? comp.production : 0;
-    return sum + production;
-  }, 0);
-
-  const totalRevenueEstimate = companies.reduce((sum, comp) => {
-    const production = typeof comp?.production === 'number' ? comp.production : 0;
-    const estimatedValue = typeof comp?.estimatedValue === 'number' ? comp.estimatedValue : 0;
-    const fallbackPrice = estimatedValue > 0 ? estimatedValue / Math.max(production, 1) : 0;
-    const itemPrice = fallbackPrice;
-    return sum + (production * itemPrice);
-  }, 0);
-
-  const totalCostEstimate = companies.reduce((sum, comp) => {
-    const production = typeof comp?.production === 'number' ? comp.production : 0;
-    const concreteInvested = typeof comp?.concreteInvested === 'number' ? comp.concreteInvested : 0;
-    const storageLevel = comp?.activeUpgradeLevels?.storage ?? 0;
-    const engineLevel = comp?.activeUpgradeLevels?.automatedEngine ?? 0;
-    const upkeep = (concreteInvested * 0.05) + (storageLevel * 3) + (engineLevel * 2);
-    return sum + (production > 0 ? upkeep : 0);
-  }, 0);
-
-  const totalProfitEstimate = totalRevenueEstimate - totalCostEstimate;
+  // Kalkulasi statistik sederhana...
+  const totalProduction = companies.reduce((sum, c) => sum + (typeof c?.production === 'number' ? c.production : 0), 0);
+  const totalEstimatedValue = companies.reduce((sum, c) => sum + (typeof c?.estimatedValue === 'number' ? c.estimatedValue : 0), 0);
 
   return (
     <div style={{ animation: 'fadeIn 0.4s ease' }}>
-
-      {/* HEADER + REFRESH */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
-        <div style={{ fontSize: '11px', color: '#aaa', textTransform: 'uppercase', letterSpacing: '1px' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '12px' }}>
+        <div style={{ fontSize: '11px', color: '#aaa', textTransform: 'uppercase' }}>
           {data?.playerData?.username ? `Pemain: ${data.playerData.username}` : 'Company Analysis'}
         </div>
-        <button
-          onClick={handleAnalyse}
-          disabled={isLoading || !userId}
-          style={{
-            background: isLoading ? '#555' : 'transparent',
-            color: '#e67e22', border: '1px solid #e67e22', padding: '6px 14px',
-            borderRadius: '6px', cursor: isLoading ? 'not-allowed' : 'pointer',
-            fontSize: '12px', fontWeight: 'bold',
-          }}
-        >
+        <button onClick={handleAnalyse} disabled={isLoading} style={{ background: 'transparent', color: '#e67e22', border: '1px solid #e67e22', padding: '6px 14px', borderRadius: '6px', cursor: 'pointer' }}>
           {isLoading ? 'MEMUAT...' : '🔄 Refresh'}
         </button>
       </div>
 
-      {errorMsg && (
-        <div style={{ background: 'rgba(231, 76, 60, 0.2)', border: '1px solid #e74c3c', color: '#e74c3c', padding: '10px', borderRadius: '6px', marginBottom: '20px' }}>
-          ⚠️ {errorMsg}
+      {!isLoading && companies.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+          {companies.map((comp, index) => (
+            <CompanyListItem
+              key={comp?._id || index}
+              comp={comp}
+              regionsDict={regionsDict}
+              productionBonus={comp?._id ? productionBonusDict[comp._id] : undefined}
+              isExpanded={expandedId === (comp?._id || index)}
+              onToggle={() => setExpandedId(prev => prev === (comp?._id || index) ? null : (comp?._id || index))}
+              marketPrices={marketPrices}
+            />
+          ))}
         </div>
       )}
-
-      {isLoading && companies.length === 0 && (
-        <div style={{ textAlign: 'center', padding: '40px', color: '#888' }}>⏳ Memuat data company...</div>
-      )}
-
-      {!isLoading && !errorMsg && companies.length > 0 && (
-        <>
-          {/* SUMMARY PANEL */}
-          <div style={{
-            background: 'rgba(20, 20, 25, 0.6)', backdropFilter: 'blur(10px)',
-            border: '1px solid #333', borderRadius: '12px', padding: '20px',
-            marginBottom: '20px', boxShadow: '0 4px 15px rgba(0,0,0,0.3)',
-          }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '20px', flexWrap: 'wrap' }}>
-              {data.playerData?.avatarUrl && (
-                <img
-                  src={data.playerData.avatarUrl}
-                  alt=""
-                  style={{ width: 48, height: 48, borderRadius: '50%', border: '2px solid #e67e22' }}
-                />
-              )}
-
-              <SummaryStat label="Companies" value={companies.length} />
-              <SummaryStat label="Total Produksi" value={`${totalProduction.toFixed(0)} u/hari`} />
-              <SummaryStat label="Nilai Estimasi" value={`${totalEstimatedValue.toFixed(2)}`} color="#8ab4f8" />
-              <SummaryStat label="Pendapatan Harian" value={`${totalRevenueEstimate.toFixed(2)} /hari`} color="#4caf50" />
-              <SummaryStat label="Biaya Harian" value={`${totalCostEstimate.toFixed(2)} /hari`} color="#e74c3c" />
-
-              <div style={{
-                marginLeft: 'auto', textAlign: 'center', background: 'rgba(0,0,0,0.4)',
-                padding: '10px 24px', borderRadius: '10px', border: '1px solid #333',
-              }}>
-                <div style={{ fontSize: '10px', color: '#888', textTransform: 'uppercase', marginBottom: '4px' }}>
-                  Profit Harian
-                </div>
-                <div style={{ fontSize: '20px', fontWeight: 'bold', color: totalProfitEstimate >= 0 ? '#4caf50' : '#e74c3c' }}>{totalProfitEstimate.toFixed(2)}</div>
-              </div>
-            </div>
-          </div>
-
-          {/* LIST COMPANIES */}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-            {companies.map((comp, index) => (
-              <CompanyListItem
-                key={comp?._id || index}
-                comp={comp}
-                regionsDict={regionsDict}
-                resolveGeoDetails={resolveGeoDetails}
-                productionBonus={comp?._id ? productionBonusDict[comp._id] : undefined}
-                isExpanded={expandedId === (comp?._id || index)}
-                onToggle={() => setExpandedId(prev => prev === (comp?._id || index) ? null : (comp?._id || index))}
-              />
-            ))}
-          </div>
-        </>
-      )}
-
-      {!isLoading && !errorMsg && companies.length === 0 && (
-        <p style={{ fontSize: '13px', color: '#888' }}>Pemain ini belum punya company.</p>
-      )}
-
     </div>
   );
 }
-
-function SummaryStat({ label, value, color = '#fff' }) {
-  return (
-    <div style={{ textAlign: 'left' }}>
-      <div style={{ fontSize: '10px', color: '#888', textTransform: 'uppercase', marginBottom: '4px' }}>
-        {label}
-      </div>
-      <div style={{ fontSize: '18px', fontWeight: 'bold', color }}>{value}</div>
-    </div>
-  );
-}
-
-function CompanyListItem({ comp, regionsDict, resolveGeoDetails, productionBonus, isExpanded, onToggle }) {
+function CompanyListItem({ comp, regionsDict, resolveGeoDetails, productionBonus, isExpanded, onToggle, marketPrices }) {
+  // 1. DEFINISI LEVEL DULU (Paling atas)
   const aeLevel = Number(comp?.activeUpgradeLevels?.automatedEngine ?? comp?.automatedEngine ?? 0);
   const ppPerDay = AE_PP_PER_DAY?.[aeLevel] ?? 0;
+  
+  // 2. DEFINISI STORAGE (Wajib di atas sebelum digunakan)
+  const storageLevel = Number(comp?.activeUpgradeLevels?.storage ?? comp?.storageLevel ?? comp?.storage?.level ?? 0);
+  const maxStorage = storageLevel * 200;
 
+  // 3. DEFINISI PRODUKSI & KALKULASI PROGRESS
   const pickNumeric = (source, keys) => {
     for (const key of keys) {
       const value = key.split('.').reduce((acc, part) => acc?.[part], source);
-      if (typeof value === 'number' && Number.isFinite(value)) {
-        return value;
-      }
+      if (typeof value === 'number' && Number.isFinite(value)) return value;
     }
     return null;
   };
 
   const productionValue = pickNumeric(comp, ['production', 'dailyProduction', 'output', 'generatedProduction']);
   const storageUsed = pickNumeric(comp, ['storageUsed', 'usedStorage', 'storage.used', 'inventoryUsed']);
-  const storageMax = pickNumeric(comp, ['storageMax', 'maxStorage', 'storage.max', 'capacity']);
-  const storageLevel = Number(comp?.activeUpgradeLevels?.storage ?? comp?.storageLevel ?? comp?.storage?.level ?? 0);
   const productionBonusValue = pickNumeric(productionBonus, ['total', 'efficiency', 'productionBonus', 'bonus']);
+  const currentProduction = Number(comp?.production ?? 0);
 
+  // 4. KALKULASI BAR (maxStorage sekarang sudah pasti ada nilainya)
+  const progressPercent = maxStorage > 0 ? Math.min((currentProduction / maxStorage) * 100, 100) : 0;
+  const barColor = progressPercent >= 90 ? '#ef4444' : '#10b981';
   // Identifikasi regional lewat field asli API ("region")
   const regionId = comp?.region;
   const regionData = regionsDict[regionId];
   const countryData = regionData?.countryData;
 
-  // Catatan: rulingParty di API asli ada di countryData.rulingParty (string ID).
-  // Ini cuma info partai berkuasa untuk ditampilkan.
+
   const rulingPartyId = countryData?.rulingParty || null;
 
-  // Production bonus SEKARANG diambil langsung dari endpoint resmi server
-  // company.getProductionBonus, bukan dihitung ulang manual di frontend.
-  // Shape: { strategicBonus, depositBonus, ethicSpecializationBonus, ethicDepositBonus, total }
+
   const totalEfficiency = productionBonusValue !== null ? 100 + productionBonusValue : null;
 
   const breakdownNotes = (() => {
@@ -402,37 +159,29 @@ function CompanyListItem({ comp, regionsDict, resolveGeoDetails, productionBonus
     const notes = [];
     const { strategicBonus = 0, depositBonus = 0, ethicSpecializationBonus = 0, ethicDepositBonus = 0, total = 0 } = productionBonus;
 
-    notes.push(strategicBonus !== 0
-      ? `${strategicBonus > 0 ? '+' : ''}${strategicBonus}% Bonus Strategis Negara`
-      : `0% Tidak ada Bonus Strategis`);
 
-    notes.push(depositBonus !== 0
-      ? `+${depositBonus}% Bonus Deposit Wilayah`
-      : `0% Tidak ada Bonus Deposit`);
+    const nationBonus = strategicBonus + depositBonus;
+    const partyBonus = ethicSpecializationBonus + ethicDepositBonus;
 
-    notes.push(ethicSpecializationBonus !== 0
-      ? `+${ethicSpecializationBonus}% Bonus Spesialisasi Etnis/Partai`
-      : `0% Tidak ada Bonus Spesialisasi Etnis`);
 
-    notes.push(ethicDepositBonus !== 0
-      ? `+${ethicDepositBonus}% Bonus Deposit Etnis/Partai`
-      : `0% Tidak ada Bonus Deposit Etnis`);
+    notes.push(`+${total.toFixed(2)}% Total Bonus`);
 
-    if (countryData?.taxes?.market !== undefined && countryData?.taxes?.market !== null) {
-      notes.push(`ℹ️ ${countryData.taxes.market}% Pajak Pasar Negara (tidak memotong production, hanya berlaku saat jual/beli)`);
+
+    if (nationBonus !== 0 || partyBonus !== 0) {
+      notes.push(` ${nationBonus.toFixed(2)}% Nation + ${partyBonus.toFixed(2)}% Party`);
     }
 
-    if (rulingPartyId) {
-      notes.push(`ℹ️ Partai berkuasa: ${rulingPartyId}`);
+
+    if (countryData?.taxes?.income !== undefined && countryData?.taxes?.income !== null) {
+      notes.push(`ℹ️ ${countryData.taxes.income}% Income tax`);
     }
 
-    notes.push(`= ${total}% Total Production Bonus`);
     return notes;
   })();
 
   const productionDisplay = productionValue !== null ? `${productionValue.toFixed(2)} u/hari` : '—';
   const effectiveStorageUsed = storageUsed ?? 0;
-  const effectiveStorageMax = storageMax ?? null;
+  const effectiveStorageMax = maxStorage ?? null;
   const storageCapacityText = effectiveStorageMax !== null
     ? `${effectiveStorageUsed} / ${effectiveStorageMax}`
     : storageLevel > 0
@@ -460,7 +209,7 @@ function CompanyListItem({ comp, regionsDict, resolveGeoDetails, productionBonus
     const countryCode = countryData?.code?.toUpperCase?.() || regionData?.countryData?.code?.toUpperCase?.() || null;
     const depositType = regionData?.deposit?.type || regionData?.depositType || null;
     const depositBonus = regionData?.deposit?.bonusPercent ?? regionData?.bonusPercent ?? null;
-    const taxRate = countryData?.taxes?.market ?? countryData?.marketTax ?? null;
+    const taxRate = countryData?.taxes?.income ?? countryData?.incomeTax ?? null;
 
     const parts = [];
     if (regionCode) parts.push(regionCode);
@@ -484,7 +233,7 @@ function CompanyListItem({ comp, regionsDict, resolveGeoDetails, productionBonus
 
   return (
     <div style={{ background: 'rgba(20, 20, 25, 0.5)', border: '1px solid #333', borderRadius: '10px', overflow: 'hidden' }}>
-      
+
       {/* HEADER BAR */}
       <div onClick={onToggle} style={{ display: 'flex', alignItems: 'center', gap: '12px', padding: '14px 16px', cursor: 'pointer' }}>
         {comp?.itemCode && (
@@ -528,62 +277,129 @@ function CompanyListItem({ comp, regionsDict, resolveGeoDetails, productionBonus
 
       {/* DETAIL DROPDOWN PANEL */}
       {isExpanded && (
-        <div style={{ padding: '0 16px 16px', borderTop: '1px solid #2a2a2a' }}>
-          <div style={{ fontSize: '12px', color: '#aaa', marginTop: '12px', lineHeight: '1.6' }}>
+  <div style={{ padding: '0 16px 16px', borderTop: '1px solid #334155' }}>
 
-            <div style={{ padding: '4px 0', borderBottom: '1px solid rgba(255,255,255,0.02)' }}>
-              <div style={{ color: '#777', fontSize: '11px', marginBottom: '3px' }}>Lokasi Negara</div>
-              <div style={{ color: '#fff', fontWeight: '500', whiteSpace: 'pre-line', lineHeight: 1.45 }}>{locationText}</div>
-            </div>
-            <DetailRow label="Pekerja Aktif" value={comp?.workerCount !== undefined ? `${comp.workerCount} Orang` : '—'} />
-            <DetailRow label="Engine Level" value={`Lv ${aeLevel}${ppPerDay !== undefined ? ` (${ppPerDay} PP/hari)` : ''}`} />
-            <DetailRow label="Produksi Harian" value={productionValue !== null ? `${productionValue.toFixed(2)} ${comp?.itemCode || ''}/hari` : '—'} />
-            <DetailRow label="Storage" value={storageLevel > 0 ? `Lv ${storageLevel}` : (effectiveStorageMax !== null ? `${effectiveStorageUsed} / ${effectiveStorageMax}` : '—')} />
-
-            {/* PANEL EDUKASI STRATEGI GEOPOLITIK */}
-            <div style={{ marginTop: '12px', padding: '10px', background: 'rgba(0, 0, 0, 0.4)', borderRadius: '8px', border: '1px solid rgba(0, 212, 255, 0.15)' }}>
-              <div style={{ fontSize: '10px', color: '#00d4ff', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: '6px', fontWeight: 'bold' }}>
-                📡 ANALISIS MAKRO EKONOMI WILAYAH
-              </div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', fontFamily: 'monospace', fontSize: '11px' }}>
-                {breakdownNotes.map((note, idx) => (
-                  <div key={idx} style={{ color: note.startsWith('-') ? '#e74c3c' : note.startsWith('0%') ? '#888' : '#4caf50' }}>
-                    ‹ {note}
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            {/* STORAGE PROGRESS BAR */}
-            <div style={{ marginTop: '12px', padding: '10px', background: 'rgba(0,0,0,0.3)', borderRadius: '6px', border: '1px solid #333' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11px', color: '#aaa', marginBottom: '6px' }}>
-                <span>Kapasitas Storage</span>
-                <span style={{ color: effectiveStorageMax !== null && effectiveStorageUsed >= effectiveStorageMax ? '#e74c3c' : '#4caf50', fontWeight: 'bold' }}>
-                  {storageCapacityText}
-                </span>
-              </div>
-              <div style={{ width: '100%', height: '8px', background: '#222', borderRadius: '4px', overflow: 'hidden' }}>
-                <div style={{
-                  width: `${storagePercent}%`,
-                  height: '100%',
-                  background: effectiveStorageMax !== null && effectiveStorageUsed >= effectiveStorageMax ? '#e74c3c' : '#4caf50',
-                  transition: 'width 0.4s ease'
-                }} />
-              </div>
-            </div>
-
+    {/* KOTAK LOKASI & STORAGE */}
+    <div style={{ 
+      background: '#0f172a', 
+      padding: '16px', 
+      borderRadius: '8px', 
+      border: '1px solid #334155', 
+      marginTop: '16px', 
+      display: 'flex', 
+      justifyContent: 'space-between',
+      fontSize: '12px' 
+    }}>
+      
+      {/* Sisi Kiri: Lokasi */}
+      <div>
+        <div style={{ color: '#94a3b8', marginBottom: '4px' }}>Lokasi</div>
+        <div style={{ color: '#fff', whiteSpace: 'pre-line' }}>{locationText}</div>
+        {productionBonus && (
+          <div style={{ color: '#3b82f6', marginTop: '4px', lineHeight: '1.4' }}>
+            {breakdownNotes.map((note, i) => <div key={i}>{note}</div>)}
           </div>
+        )}
+      </div>
+
+      {/* Sisi Kanan: Storage */}
+      <div style={{ width: '40%' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11px', marginBottom: '4px', color: '#94a3b8' }}>
+          <span>Storage Status (Lv {storageLevel})</span>
+          <span>{currentProduction.toFixed(2)} / {maxStorage}</span>
+        </div>
+
+        {/* Container Bar */}
+        <div style={{ width: '100%', height: '8px', background: '#1e293b', borderRadius: '4px', overflow: 'hidden' }}>
+          <div style={{
+            width: `${progressPercent}%`,
+            height: '100%',
+            background: barColor,
+            transition: 'width 0.3s ease'
+                }}></div>
+              </div>
+            </div>
+          </div>
+
+          {/* GRID: ENGINE & SUMMARY (Ala Arcana dengan Harga Asli) */}
+          {(() => {
+            // 1. Ambil Harga Asli dari marketPrices
+            const rawMarketData = marketPrices[comp?.itemCode];
+            const realPrice = typeof rawMarketData === 'number'
+              ? rawMarketData
+              : (rawMarketData?.avg ?? rawMarketData?.price ?? rawMarketData?.value ?? 0);
+
+            // 2. Kalkulasi PP
+            const basePP = ppPerDay || 0;
+            const bonusPercent = productionBonus?.total || 0;
+            const enginePPWithBonus = basePP * (1 + (bonusPercent / 100));
+            const workers = comp?.workerCount || 0;
+            const totalPP = enginePPWithBonus;
+
+            // 3. Estimasi Produksi & Harga
+            const dailyProduction = productionValue || 0;
+
+            // Gunakan harga asli dari API jika ada. Jika belum di-load, fallback ke estimasi.
+            const itemPrice = realPrice > 0
+              ? realPrice
+              : (comp?.estimatedValue > 0 && dailyProduction > 0 ? (comp.estimatedValue / dailyProduction) : 0);
+
+            const grossRevenue = dailyProduction * itemPrice;
+
+            // 4. Upkeep & Profit
+            const concreteInvested = comp?.concreteInvested || 0;
+            const upkeep = (concreteInvested * 0.05) + (storageLevel * 3) + (aeLevel * 2);
+            const netProfit = grossRevenue - upkeep;
+
+            return (
+              <div style={{ marginTop: '20px', display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(250px, 1fr))', gap: '16px' }}>
+
+                {/* KOTAK 1: AUTOMATED ENGINE */}
+                <div style={{ background: '#0f172a', padding: '16px', borderRadius: '8px', border: '1px solid #334155' }}>
+                  <div style={{ fontWeight: '600', color: '#f8fafc', marginBottom: '12px', fontSize: '13px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    ⚙️ Automated Engine — Lv {aeLevel}
+                  </div>
+                  <DetailRow label="Base PP / day" value={`${basePP.toFixed(2)} PP`} />
+                  <DetailRow label="Production bonus" value={`+${bonusPercent.toFixed(2)}%`} valueColor="#10b981" />
+                  <div style={{ borderTop: '1px dashed #334155', margin: '8px 0' }}></div>
+                  <DetailRow label="Engine PP (with bonus)" value={`${enginePPWithBonus.toFixed(2)} PP`} />
+                  <DetailRow label={`Workers (${workers})`} value="0.00 PP" />
+                </div>
+
+                {/* KOTAK 2: DAILY SUMMARY */}
+                <div style={{ background: '#0f172a', padding: '16px', borderRadius: '8px', border: '1px solid #334155' }}>
+                  <div style={{ fontWeight: '600', color: '#f8fafc', marginBottom: '12px', fontSize: '13px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    📊 Daily Summary
+                  </div>
+                  <DetailRow label="Total PP / day" value={`${totalPP.toFixed(2)} PP`} />
+                  <DetailRow label="Production" value={`${dailyProduction.toFixed(0)} ${comp?.itemCode || ''}/day`} />
+                  <DetailRow label="Market price / unit" value={itemPrice > 0 ? itemPrice.toFixed(3) : '—'} />
+                  <DetailRow label="Market revenue" value={`+${grossRevenue.toFixed(3)}`} valueColor="#10b981" />
+                  <DetailRow label="Upkeep / Wage costs" value={`-${upkeep.toFixed(3)}`} valueColor="#ef4444" />
+                  <div style={{ borderTop: '1px dashed #334155', margin: '8px 0' }}></div>
+                  <DetailRow
+                    label="Net Profit / day"
+                    value={`${netProfit > 0 ? '+' : ''}${netProfit.toFixed(3)}`}
+                    valueColor={netProfit > 0 ? '#10b981' : '#ef4444'}
+                    isBold={true}
+                  />
+                </div>
+
+              </div>
+            );
+          })()}
+
         </div>
       )}
     </div>
   );
 }
 
-function DetailRow({ label, value }) {
+function DetailRow({ label, value, valueColor = '#f8fafc', isBold = false }) {
   return (
-    <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', borderBottom: '1px solid rgba(255,255,255,0.02)' }}>
-      <span style={{ color: '#777' }}>{label}</span>
-      <span style={{ color: '#fff', fontWeight: '500' }}>{value}</span>
+    <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', fontSize: '12.5px', borderBottom: '1px solid rgba(255,255,255,0.02)' }}>
+      <span style={{ color: '#94a3b8' }}>{label}</span>
+      <span style={{ color: valueColor, fontWeight: isBold ? '700' : '500' }}>{value}</span>
     </div>
   );
 }
